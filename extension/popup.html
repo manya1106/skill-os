@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SkillOS</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --indigo: #4F46E5;
+      --indigo-light: #EEF2FF;
+      --indigo-dark: #3730A3;
+      --purple: #7C3AED;
+      --surface: #FFFFFF;
+      --bg: #F8F7FF;
+      --border: #E5E7EB;
+      --text: #111827;
+      --muted: #6B7280;
+      --green: #16A34A;
+      --amber: #D97706;
+      --red: #DC2626;
+    }
+
+    body {
+      width: 340px;
+      min-height: 420px;
+      font-family: 'DM Sans', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 13px;
+    }
+
+    /* ── Header ──────────────────────────────────── */
+    .header {
+      background: linear-gradient(135deg, #312E81 0%, #4F46E5 50%, #7C3AED 100%);
+      padding: 14px 16px 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .logo-icon {
+      width: 28px;
+      height: 28px;
+      background: rgba(255,255,255,0.2);
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+    }
+
+    .logo-text {
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 16px;
+      font-weight: 700;
+      color: white;
+      letter-spacing: -0.3px;
+    }
+
+    .logo-text span { color: #A5B4FC; }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #6EE7B7;
+      box-shadow: 0 0 0 2px rgba(110,231,183,0.3);
+      transition: background 0.3s;
+    }
+
+    .status-dot.offline { background: #FCA5A5; box-shadow: 0 0 0 2px rgba(252,165,165,0.3); }
+
+    /* ── Auth section ────────────────────────────── */
+    #auth-section {
+      padding: 20px 16px;
+    }
+
+    .auth-title {
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+
+    .auth-sub {
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 16px;
+      line-height: 1.5;
+    }
+
+    .token-input {
+      width: 100%;
+      padding: 9px 12px;
+      border: 1.5px solid var(--border);
+      border-radius: 10px;
+      font-size: 12px;
+      font-family: 'DM Sans', sans-serif;
+      background: white;
+      color: var(--text);
+      outline: none;
+      transition: border-color 0.2s;
+      margin-bottom: 10px;
+    }
+
+    .token-input:focus { border-color: var(--indigo); }
+
+    .btn-primary {
+      width: 100%;
+      padding: 9px;
+      background: var(--indigo);
+      color: white;
+      border: none;
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 600;
+      font-family: 'DM Sans', sans-serif;
+      cursor: pointer;
+      transition: background 0.2s, transform 0.1s;
+    }
+
+    .btn-primary:hover { background: var(--indigo-dark); }
+    .btn-primary:active { transform: scale(0.98); }
+
+    .how-to-link {
+      text-align: center;
+      margin-top: 10px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .how-to-link a { color: var(--indigo); text-decoration: none; }
+
+    /* ── Main dashboard ───────────────────────────── */
+    #main-section { display: none; }
+
+    /* Stats row */
+    .stats-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 8px;
+      padding: 14px 16px 0;
+    }
+
+    .stat-card {
+      background: white;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 8px;
+      text-align: center;
+    }
+
+    .stat-val {
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--indigo);
+      line-height: 1;
+      margin-bottom: 3px;
+    }
+
+    .stat-label {
+      font-size: 10px;
+      color: var(--muted);
+      font-weight: 500;
+    }
+
+    /* Current page detect */
+    .page-card {
+      margin: 10px 16px 0;
+      background: white;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 11px 13px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .page-icon {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 15px;
+      flex-shrink: 0;
+    }
+
+    .page-info { flex: 1; min-width: 0; }
+
+    .page-platform {
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 2px;
+    }
+
+    .page-title {
+      font-size: 12px;
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      color: var(--text);
+    }
+
+    .tracking-badge {
+      font-size: 10px;
+      font-weight: 600;
+      padding: 3px 7px;
+      border-radius: 20px;
+      flex-shrink: 0;
+    }
+
+    .tracking-badge.active { background: #D1FAE5; color: #065F46; }
+    .tracking-badge.inactive { background: #F3F4F6; color: var(--muted); }
+
+    /* Queue section */
+    .section-title {
+      padding: 12px 16px 6px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .queue-row {
+      margin: 0 16px;
+      background: white;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 13px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .queue-left { display: flex; align-items: center; gap: 8px; }
+    .queue-icon { font-size: 16px; }
+    .queue-text { font-size: 12px; font-weight: 500; }
+    .queue-sub { font-size: 11px; color: var(--muted); }
+
+    .sync-btn {
+      padding: 5px 10px;
+      background: var(--indigo-light);
+      color: var(--indigo);
+      border: none;
+      border-radius: 7px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+      font-family: 'DM Sans', sans-serif;
+    }
+
+    .sync-btn:hover { background: #DDD6FE; }
+    .sync-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* Sites toggles */
+    .sites-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      margin: 0 16px;
+    }
+
+    .site-toggle {
+      background: white;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 8px 10px;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+    }
+
+    .site-toggle.on { border-color: var(--indigo); background: var(--indigo-light); }
+
+    .site-emoji { font-size: 13px; }
+    .site-name { font-size: 11px; font-weight: 500; flex: 1; }
+
+    .toggle-pill {
+      width: 24px;
+      height: 14px;
+      border-radius: 7px;
+      background: var(--border);
+      position: relative;
+      transition: background 0.2s;
+      flex-shrink: 0;
+    }
+
+    .toggle-pill::after {
+      content: '';
+      position: absolute;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: white;
+      top: 2px;
+      left: 2px;
+      transition: transform 0.2s;
+    }
+
+    .site-toggle.on .toggle-pill { background: var(--indigo); }
+    .site-toggle.on .toggle-pill::after { transform: translateX(10px); }
+
+    /* Footer */
+    .footer {
+      padding: 12px 16px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-top: 1px solid var(--border);
+      margin-top: 12px;
+    }
+
+    .last-sync { font-size: 11px; color: var(--muted); }
+
+    .signout-btn {
+      font-size: 11px;
+      color: #EF4444;
+      background: none;
+      border: none;
+      cursor: pointer;
+      font-family: 'DM Sans', sans-serif;
+      padding: 4px 6px;
+      border-radius: 6px;
+      transition: background 0.2s;
+    }
+
+    .signout-btn:hover { background: #FEE2E2; }
+
+    /* Error / success toast */
+    .toast {
+      margin: 8px 16px 0;
+      padding: 8px 11px;
+      border-radius: 9px;
+      font-size: 12px;
+      display: none;
+    }
+
+    .toast.error { background: #FEF2F2; color: #B91C1C; border: 1px solid #FECACA; }
+    .toast.success { background: #F0FDF4; color: #166534; border: 1px solid #BBF7D0; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <div class="header">
+    <div class="logo">
+      <div class="logo-icon">⚡</div>
+      <div class="logo-text">Skill<span>OS</span></div>
+    </div>
+    <div class="status-dot" id="status-dot"></div>
+  </div>
+
+  <!-- Auth Section -->
+  <div id="auth-section">
+    <div class="auth-title">Connect to SkillOS</div>
+    <div class="auth-sub">Paste your token from the SkillOS web app to start tracking your learning automatically.</div>
+
+    <div class="toast error" id="auth-error">Invalid token. Please try again.</div>
+
+    <input
+      class="token-input"
+      id="token-input"
+      type="password"
+      placeholder="Paste your JWT token here…"
+      autocomplete="off"
+    />
+    <button class="btn-primary" id="connect-btn">Connect</button>
+
+    <div class="how-to-link">
+      Get your token from <a href="http://localhost:5173" target="_blank">SkillOS → Settings</a>
+    </div>
+  </div>
+
+  <!-- Main Dashboard -->
+  <div id="main-section">
+
+    <!-- Stats -->
+    <div class="stats-row">
+      <div class="stat-card">
+        <div class="stat-val" id="stat-streak">—</div>
+        <div class="stat-label">Day streak</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val" id="stat-xp">—</div>
+        <div class="stat-label">XP total</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val" id="stat-synced">—</div>
+        <div class="stat-label">Events sent</div>
+      </div>
+    </div>
+
+    <!-- Current page -->
+    <div class="page-card" id="page-card" style="display:none">
+      <div class="page-icon" id="page-icon">📺</div>
+      <div class="page-info">
+        <div class="page-platform" id="page-platform">YouTube</div>
+        <div class="page-title" id="page-title">Loading…</div>
+      </div>
+      <div class="tracking-badge active" id="tracking-badge">Tracking</div>
+    </div>
+
+    <!-- Queue -->
+    <div class="section-title">Sync</div>
+    <div class="queue-row">
+      <div class="queue-left">
+        <div class="queue-icon">📦</div>
+        <div>
+          <div class="queue-text"><span id="queue-count">0</span> events queued</div>
+          <div class="queue-sub" id="last-sync-sub">Never synced</div>
+        </div>
+      </div>
+      <button class="sync-btn" id="sync-btn">Sync now</button>
+    </div>
+
+    <!-- Site toggles -->
+    <div class="section-title">Track on</div>
+    <div class="sites-grid" id="sites-grid">
+      <!-- Rendered by JS -->
+    </div>
+
+    <!-- Footer -->
+    <div class="footer">
+      <span class="last-sync" id="footer-status">Connected</span>
+      <button class="signout-btn" id="signout-btn">Disconnect</button>
+    </div>
+
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
