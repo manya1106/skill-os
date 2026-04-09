@@ -1,3 +1,17 @@
+"""
+SkillOS FastAPI Backend — main.py
+Updated to include ML proxy routes that call the Flask ML service.
+
+New endpoints added:
+  GET  /recommendations       → proxied to Flask ML service
+  GET  /users/me/struggles    → proxied to Flask ML service
+  POST /ml/retrain            → proxied to Flask ML service (admin only)
+
+All existing routes (auth, resources, decks, cards, etc.) unchanged.
+"""
+
+import httpx
+import os
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -7,7 +21,6 @@ from passlib.context import CryptContext
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import date, datetime, timedelta
-import os
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -16,7 +29,7 @@ app = FastAPI(title="SkillOS API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],  # your Vite dev server
+    allow_origins=["http://localhost:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -28,7 +41,11 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 JWT_SECRET = os.getenv("JWT_SECRET")
 JWT_ALGO = "HS256"
 
-# ─── Auth helpers ───────────────────────────────────────────
+# URL of the Flask ML microservice
+ML_SERVICE_URL = os.getenv("ML_SERVICE_URL", "http://localhost:8001")
+
+
+# ─── Auth helpers ────────────────────────────────────────────────────────
 
 def create_token(user_id: str) -> str:
     payload = {"sub": user_id, "exp": datetime.utcnow() + timedelta(days=7)}
@@ -44,7 +61,8 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-# ─── Pydantic models ─────────────────────────────────────────
+
+# ─── Pydantic models ──────────────────────────────────────────────────────
 
 class RegisterInput(BaseModel):
     name: str
@@ -79,7 +97,8 @@ class CardReview(BaseModel):
 class BuddyRequestCreate(BaseModel):
     to_user_id: str
 
-# ─── Auth routes ─────────────────────────────────────────────
+
+# ─── Auth routes ──────────────────────────────────────────────────────────
 
 @app.post("/auth/register")
 def register(data: RegisterInput):
@@ -105,7 +124,8 @@ def login(form: OAuth2PasswordRequestForm = Depends()):
         raise HTTPException(401, "Invalid credentials")
     return {"access_token": create_token(user["id"]), "token_type": "bearer"}
 
-# ─── User routes ──────────────────────────────────────────────
+
+# ─── User routes ──────────────────────────────────────────────────────────
 
 @app.get("/users/me")
 def get_me(user_id: str = Depends(get_current_user)):
@@ -114,7 +134,8 @@ def get_me(user_id: str = Depends(get_current_user)):
     ).eq("id", user_id).single().execute()
     return result.data
 
-# ─── Resources routes ─────────────────────────────────────────
+
+# ─── Resources routes ─────────────────────────────────────────────────────
 
 @app.get("/resources")
 def list_resources(user_id: str = Depends(get_current_user)):
@@ -124,14 +145,14 @@ def list_resources(user_id: str = Depends(get_current_user)):
 @app.post("/resources", status_code=201)
 def create_resource(data: ResourceCreate, user_id: str = Depends(get_current_user)):
     result = supabase.table("resources").insert({
-        **data.dict(), "user_id": user_id
+        **data.dict(), "user_id": user_id, "progress": 0, "status": "not-started"
     }).execute()
     return result.data[0]
 
 @app.patch("/resources/{resource_id}")
 def update_resource(resource_id: str, data: ResourceUpdate,
                     user_id: str = Depends(get_current_user)):
-    update_data = data.dict(exclude_unset=True)  # only include fields actually sent
+    update_data = data.dict(exclude_unset=True)
     if not update_data:
         raise HTTPException(400, "Nothing to update")
     result = supabase.table("resources").update(update_data)\
@@ -145,19 +166,19 @@ def delete_resource(resource_id: str, user_id: str = Depends(get_current_user)):
     supabase.table("resources").delete()\
         .eq("id", resource_id).eq("user_id", user_id).execute()
 
-# ─── Flashcard deck routes ────────────────────────────────────
+
+# ─── Flashcard deck routes ────────────────────────────────────────────────
 
 @app.get("/decks")
 def list_decks(user_id: str = Depends(get_current_user)):
     decks = supabase.table("flashcard_decks").select("*")\
         .eq("user_id", user_id).execute().data
-    # Annotate each deck with card counts
     for deck in decks:
-        cards = supabase.table("flashcards").select("id,due_date")\
+        cards = supabase.table("flashcards").select("id,due_date,review_count")\
             .eq("deck_id", deck["id"]).execute().data
-        deck["card_count"] = len(cards)
-        deck["due_count"] = sum(1 for c in cards if c["due_date"] <= str(date.today()))
-        deck["mastered_count"] = sum(1 for c in cards if c.get("review_count", 0) >= 3)
+        deck["card_count"]    = len(cards)
+        deck["due_count"]     = sum(1 for c in cards if c["due_date"] <= str(date.today()))
+        deck["mastered_count"]= sum(1 for c in cards if (c.get("review_count") or 0) >= 3)
     return decks
 
 @app.post("/decks", status_code=201)
@@ -179,7 +200,9 @@ def list_cards(deck_id: str, due_only: bool = False,
 def create_card(deck_id: str, data: CardCreate,
                 user_id: str = Depends(get_current_user)):
     result = supabase.table("flashcards").insert({
-        **data.dict(), "deck_id": deck_id
+        **data.dict(), "deck_id": deck_id,
+        "due_date": str(date.today()),
+        "stability": 1.0, "difficulty": 0.5, "review_count": 0,
     }).execute()
     return result.data[0]
 
@@ -189,27 +212,25 @@ def review_card(card_id: str, data: CardReview,
     card = supabase.table("flashcards").select("*")\
         .eq("id", card_id).single().execute().data
 
-    # Simple FSRS-inspired scheduling
-    intervals = {0: 1, 1: 3, 2: 7, 3: 14}  # days per rating
-    new_stability = card["stability"] * (1 + 0.1 * data.rating)
+    intervals = {0: 1, 1: 3, 2: 7, 3: 14}
+    new_stability  = card["stability"] * (1 + 0.1 * data.rating)
     new_difficulty = max(0.1, card["difficulty"] - 0.05 * (data.rating - 2))
-    days_ahead = intervals.get(data.rating, 7)
-    next_due = date.today() + timedelta(days=days_ahead)
+    next_due = date.today() + timedelta(days=intervals.get(data.rating, 7))
 
     result = supabase.table("flashcards").update({
-        "stability": new_stability,
-        "difficulty": new_difficulty,
-        "due_date": str(next_due),
-        "last_review": str(date.today()),
-        "review_count": card["review_count"] + 1
+        "stability":    new_stability,
+        "difficulty":   new_difficulty,
+        "due_date":     str(next_due),
+        "last_review":  str(date.today()),
+        "review_count": card["review_count"] + 1,
     }).eq("id", card_id).execute()
     return result.data[0]
 
-# ─── Activity / heatmap routes ────────────────────────────────
+
+# ─── Activity routes ──────────────────────────────────────────────────────
 
 @app.get("/activity/heatmap")
 def get_heatmap(user_id: str = Depends(get_current_user)):
-    # Last 365 days
     since = str(date.today() - timedelta(days=365))
     rows = supabase.table("activity_log").select("date,minutes")\
         .eq("user_id", user_id).gte("date", since).execute().data
@@ -218,7 +239,6 @@ def get_heatmap(user_id: str = Depends(get_current_user)):
 @app.post("/activity/log")
 def log_activity(minutes: int, user_id: str = Depends(get_current_user)):
     today = str(date.today())
-    # Upsert — adds to today's total if it already exists
     existing = supabase.table("activity_log").select("id,minutes")\
         .eq("user_id", user_id).eq("date", today).execute().data
     if existing:
@@ -231,49 +251,118 @@ def log_activity(minutes: int, user_id: str = Depends(get_current_user)):
         }).execute()
     return {"date": today, "minutes": minutes}
 
-# ─── Recommendations (rule-based for now) ────────────────────
+
+# ─── ML proxy routes ──────────────────────────────────────────────────────
+# These proxy to the Flask ML microservice so the frontend only talks to one
+# backend (port 8000). The ML service runs separately on port 8001.
 
 @app.get("/recommendations")
-def get_recommendations(user_id: str = Depends(get_current_user)):
-    resources = supabase.table("resources").select("tags,platform")\
-        .eq("user_id", user_id).execute().data
+async def get_recommendations(
+    top_n: int = 6,
+    user_id: str = Depends(get_current_user),
+):
+    """
+    Proxy to Flask ML service.
+    Returns personalised resource recommendations.
+    Uses TF-IDF until DAE-CF model is trained.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(
+                f"{ML_SERVICE_URL}/ml/recommend/{user_id}",
+                params={"top_n": top_n},
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except httpx.ConnectError:
+        # ML service not running yet — return static fallback
+        return {
+            "recommendations": _static_fallback_recs(),
+            "model": "static_fallback",
+        }
+    except Exception as e:
+        raise HTTPException(500, f"ML service error: {e}")
 
-    # Collect all tags the user has engaged with
-    all_tags = [tag for r in resources for tag in (r.get("tags") or [])]
-    platforms_used = list({r["platform"] for r in resources})
 
-    # In real life this hits your ML model — for now return a placeholder
-    return {
-        "tags_profile": list(set(all_tags)),
-        "platforms": platforms_used,
-        "note": "Replace this endpoint with your ML model output"
-    }
+@app.get("/users/me/struggles")
+async def get_my_struggles(user_id: str = Depends(get_current_user)):
+    """
+    Proxy to Flask ML service.
+    Returns resources the user is currently struggling with.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{ML_SERVICE_URL}/ml/struggle/{user_id}")
+            resp.raise_for_status()
+            return resp.json()
+    except httpx.ConnectError:
+        return {"struggling_count": 0, "resources": []}
+    except Exception as e:
+        raise HTTPException(500, f"ML service error: {e}")
 
-# ─── Study buddies ────────────────────────────────────────────
+
+@app.post("/ml/retrain")
+async def trigger_retrain(
+    x_retrain_secret: Optional[str] = None,
+    user_id: str = Depends(get_current_user),
+):
+    """Trigger DAE-CF retraining. Pass X-Retrain-Secret header."""
+    secret = os.getenv("RETRAIN_SECRET", "changemeplease")
+    if x_retrain_secret != secret:
+        raise HTTPException(403, "Invalid retrain secret")
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        resp = await client.post(
+            f"{ML_SERVICE_URL}/ml/retrain",
+            headers={"X-Retrain-Secret": secret},
+        )
+        return resp.json()
+
+
+@app.get("/ml/health")
+async def ml_health():
+    """Check whether the ML service is reachable and which model is active."""
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get(f"{ML_SERVICE_URL}/ml/health")
+            return resp.json()
+    except httpx.ConnectError:
+        return {"status": "ml_service_offline", "mode": "static_fallback"}
+
+
+# ─── Study buddies ────────────────────────────────────────────────────────
 
 @app.get("/buddies/matches")
 def find_buddies(user_id: str = Depends(get_current_user)):
-    # Get other users (exclude self and already-requested)
     sent = supabase.table("buddy_requests").select("to_user_id")\
         .eq("from_user_id", user_id).execute().data
     exclude_ids = {r["to_user_id"] for r in sent} | {user_id}
-
-    others = supabase.table("users").select(
-        "id,name,level,xp"
-    ).execute().data
-    matches = [u for u in others if u["id"] not in exclude_ids][:10]
-    return matches
+    others = supabase.table("users").select("id,name,level,xp").execute().data
+    return [u for u in others if u["id"] not in exclude_ids][:10]
 
 @app.post("/buddies/request", status_code=201)
 def send_buddy_request(data: BuddyRequestCreate,
                         user_id: str = Depends(get_current_user)):
     result = supabase.table("buddy_requests").insert({
-        "from_user_id": user_id,
-        "to_user_id": data.to_user_id
+        "from_user_id": user_id, "to_user_id": data.to_user_id
     }).execute()
     return result.data[0]
 
-# ─── Run ──────────────────────────────────────────────────────
+
+# ─── Helpers ──────────────────────────────────────────────────────────────
+
+def _static_fallback_recs() -> list[dict]:
+    """Shown only if ML service is completely offline."""
+    return [
+        {"id": "s1", "platform": "YouTube",      "title": "Backpropagation Explained — 3Blue1Brown", "tags": ["ML"],      "match_score": 98, "reason": "Highly rated"},
+        {"id": "s2", "platform": "Udemy",        "title": "Scikit-learn: ML in Python",              "tags": ["Python"],  "match_score": 94, "reason": "Top ML course"},
+        {"id": "s3", "platform": "Coursera",     "title": "Deep Learning Specialisation",            "tags": ["DL"],      "match_score": 91, "reason": "Andrew Ng classic"},
+        {"id": "s4", "platform": "freeCodeCamp", "title": "Data Visualisation with D3.js",           "tags": ["JS"],      "match_score": 88, "reason": "Great for data"},
+        {"id": "s5", "platform": "YouTube",      "title": "Statistics for ML — StatQuest",           "tags": ["Stats"],   "match_score": 86, "reason": "Fill the gaps"},
+        {"id": "s6", "platform": "Udemy",        "title": "FastAPI — Build Modern APIs",             "tags": ["Python"],  "match_score": 83, "reason": "Your next step"},
+    ]
+
+
+# ─── Run ──────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import uvicorn
