@@ -1,8 +1,14 @@
-import React, { useState, useEffect } from "react";
+// App.jsx — key changes from previous version:
+// 1. Analytics page added to nav (replaces old static rewards page logic)
+// 2. Rewards now gets real achievements from DB
+// 3. XP/streak updated on every login via backend
+// 4. _xp field from resource mutations reflected in user state
+
+import React, { useState, useEffect, useCallback } from "react";
 import {
   Mail, Lock, Eye, EyeOff, ArrowRight, Zap,
   Bell, LayoutDashboard, BookOpen, Trophy, LogOut,
-  Star, Flame, Sparkles, Layers, Users, User,
+  Star, Flame, Sparkles, Layers, Users, User, BarChart2,
 } from "lucide-react";
 
 import { api } from "./api";
@@ -10,6 +16,8 @@ import MyLearning      from "./components/MyLearning";
 import Recommendations from "./components/Recommendations";
 import Flashcards      from "./components/Flashcards";
 import StudyBuddies    from "./components/StudyBuddies";
+import Analytics       from "./components/Analytics";
+import Rewards         from "./components/Rewards";
 
 const NAV = [
   { id: "dashboard",       label: "Dashboard",     Icon: LayoutDashboard },
@@ -17,97 +25,174 @@ const NAV = [
   { id: "recommendations", label: "Recommended",   Icon: Sparkles        },
   { id: "flashcards",      label: "Flashcards",    Icon: Layers          },
   { id: "buddies",         label: "Study buddies", Icon: Users           },
+  { id: "analytics",       label: "Analytics",     Icon: BarChart2       },
   { id: "rewards",         label: "Rewards",       Icon: Trophy          },
 ];
 
-// ── Shell ──────────────────────────────────────────────────────
-function Shell({ page, setPage, onLogout, user, children }) {
+// ── XP toast notification ─────────────────────────────────────────────────────
+function XPToast({ xp, onDone }) {
+  useEffect(() => {
+    const t = setTimeout(onDone, 2200);
+    return () => clearTimeout(t);
+  }, []);
+  return (
+    <div style={{
+      position: "fixed", bottom: 24, right: 24, zIndex: 9999,
+      background: "#312E81", color: "white",
+      padding: "10px 18px", borderRadius: 12,
+      fontSize: 13, fontWeight: 500,
+      display: "flex", alignItems: "center", gap: 8,
+      animation: "slideUp 0.3s ease",
+      boxShadow: "0 4px 24px rgba(0,0,0,0.18)",
+    }}>
+      <Star style={{ width: 14, height: 14, fill: "#FCD34D", stroke: "none" }} />
+      +{xp} XP earned!
+    </div>
+  );
+}
+
+// ── Shell ──────────────────────────────────────────────────────────────────────
+function Shell({ page, setPage, onLogout, user, toast, children }) {
   const initials = user?.name
     ? user.name.split(" ").map(w => w[0]).join("").slice(0, 2).toUpperCase()
     : "??";
 
   return (
-    <div className="flex h-screen w-full bg-slate-50 font-sans text-slate-900 overflow-hidden">
-      <aside className="w-64 bg-white border-r border-slate-200 hidden md:flex flex-col justify-between">
+    <div style={{ display: "flex", height: "100vh", width: "100%", overflow: "hidden" }}>
+      <style>{`
+        @keyframes slideUp { from { opacity:0; transform:translateY(12px); } to { opacity:1; transform:none; } }
+        * { box-sizing: border-box; }
+        body { margin: 0; font-family: var(--font-sans); background: var(--color-background-tertiary); color: var(--color-text-primary); }
+        ::-webkit-scrollbar { width: 5px; } ::-webkit-scrollbar-thumb { background: var(--color-border-secondary); border-radius: 4px; }
+      `}</style>
+
+      {/* Sidebar */}
+      <aside style={{
+        width: 224, background: "var(--color-background-primary)",
+        borderRight: "0.5px solid var(--color-border-tertiary)",
+        display: "flex", flexDirection: "column", justifyContent: "space-between",
+        flexShrink: 0,
+      }}>
         <div>
-          <div className="h-16 flex items-center px-6 border-b border-slate-100">
-            <div className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow">
-                <Zap className="w-4 h-4 text-white" fill="currentColor" />
-              </div>
-              <span className="text-lg font-bold tracking-tight">
-                Skill<span className="text-indigo-600">OS</span>
-              </span>
+          {/* Logo */}
+          <div style={{
+            height: 56, display: "flex", alignItems: "center", padding: "0 20px",
+            borderBottom: "0.5px solid var(--color-border-tertiary)",
+          }}>
+            <div style={{
+              width: 28, height: 28, borderRadius: 8,
+              background: "linear-gradient(135deg, #4F46E5, #7C3AED)",
+              display: "flex", alignItems: "center", justifyContent: "center", marginRight: 8,
+            }}>
+              <Zap style={{ width: 14, height: 14, color: "white" }} fill="white" />
             </div>
+            <span style={{ fontSize: 16, fontWeight: 700, letterSpacing: "-0.3px" }}>
+              Skill<span style={{ color: "#4F46E5" }}>OS</span>
+            </span>
           </div>
-          <nav className="p-3 space-y-0.5">
+
+          {/* Nav */}
+          <nav style={{ padding: "10px 8px" }}>
             {NAV.map(({ id, label, Icon }) => (
-              <button
-                key={id}
-                onClick={() => setPage(id)}
-                className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-xl text-sm font-medium transition-colors ${
-                  page === id
-                    ? "bg-indigo-50 text-indigo-700"
-                    : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
-                }`}
-              >
-                <Icon className="w-4 h-4 shrink-0" />
+              <button key={id} onClick={() => setPage(id)} style={{
+                width: "100%", display: "flex", alignItems: "center", gap: 10,
+                padding: "8px 12px", borderRadius: 10, marginBottom: 1,
+                fontSize: 13, fontWeight: page === id ? 500 : 400,
+                background: page === id ? "var(--color-background-info)" : "transparent",
+                color: page === id ? "var(--color-text-info)" : "var(--color-text-secondary)",
+                border: "none", cursor: "pointer", transition: "all 0.15s",
+                textAlign: "left",
+              }}>
+                <Icon style={{ width: 15, height: 15, flexShrink: 0 }} />
                 {label}
               </button>
             ))}
           </nav>
         </div>
-        <div className="p-4 border-t border-slate-100">
-          <div className="flex items-center gap-3 px-3 py-2 rounded-xl bg-slate-50 mb-2">
-            <div className="w-9 h-9 rounded-full bg-indigo-100 flex items-center justify-center text-xs font-bold text-indigo-700 shrink-0">
+
+        {/* User footer */}
+        <div style={{ padding: "12px 8px", borderTop: "0.5px solid var(--color-border-tertiary)" }}>
+          <div style={{
+            display: "flex", alignItems: "center", gap: 10,
+            padding: "8px 10px", borderRadius: 10,
+            background: "var(--color-background-secondary)", marginBottom: 6,
+          }}>
+            <div style={{
+              width: 34, height: 34, borderRadius: "50%",
+              background: "var(--color-background-info)",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              fontSize: 11, fontWeight: 700, color: "var(--color-text-info)", flexShrink: 0,
+            }}>
               {initials}
             </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-bold text-slate-900 truncate">{user?.name ?? "—"}</p>
-              <p className="text-xs text-slate-500">
-                Level {user?.level ?? 1} · {user?.streak ?? 0}d streak
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <p style={{ margin: 0, fontSize: 12, fontWeight: 500, color: "var(--color-text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {user?.name ?? "—"}
+              </p>
+              <p style={{ margin: 0, fontSize: 11, color: "var(--color-text-tertiary)" }}>
+                Lv {user?.level ?? 1} · {user?.streak ?? 0}d 🔥
               </p>
             </div>
           </div>
-          <button
-            onClick={onLogout}
-            className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-xl transition-colors"
-          >
-            <LogOut className="w-4 h-4" /> Sign out
+          <button onClick={onLogout} style={{
+            width: "100%", display: "flex", alignItems: "center", gap: 8,
+            padding: "7px 10px", borderRadius: 10, fontSize: 12,
+            color: "var(--color-text-tertiary)", background: "none",
+            border: "none", cursor: "pointer",
+            transition: "all 0.15s",
+          }}>
+            <LogOut style={{ width: 13, height: 13 }} /> Sign out
           </button>
         </div>
       </aside>
 
-      <main className="flex-1 flex flex-col h-full overflow-hidden">
-        <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-6 shrink-0">
-          <h1 className="text-base font-bold text-slate-900 capitalize">
+      {/* Main content */}
+      <main style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+        {/* Header */}
+        <header style={{
+          height: 56, background: "var(--color-background-primary)",
+          borderBottom: "0.5px solid var(--color-border-tertiary)",
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          padding: "0 24px", flexShrink: 0,
+        }}>
+          <h1 style={{ margin: 0, fontSize: 14, fontWeight: 500 }}>
             {NAV.find(n => n.id === page)?.label ?? "Dashboard"}
           </h1>
-          <div className="flex items-center gap-4">
-            <div className="flex items-center gap-3 bg-slate-100 px-3 py-1.5 rounded-full text-xs">
-              <span className="flex items-center gap-1 text-amber-500 font-bold">
-                <Flame className="w-3.5 h-3.5" fill="currentColor" />
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <div style={{
+              display: "flex", alignItems: "center", gap: 10,
+              background: "var(--color-background-secondary)",
+              padding: "5px 12px", borderRadius: 20, fontSize: 12,
+            }}>
+              <span style={{ display: "flex", alignItems: "center", gap: 4, color: "#F59E0B", fontWeight: 500 }}>
+                <Flame style={{ width: 13, height: 13 }} fill="currentColor" />
                 {user?.streak ?? 0}d
               </span>
-              <span className="w-px h-3 bg-slate-300" />
-              <span className="flex items-center gap-1 text-indigo-600 font-bold">
-                <Star className="w-3.5 h-3.5" fill="currentColor" />
+              <span style={{ width: 1, height: 12, background: "var(--color-border-tertiary)" }} />
+              <span style={{ display: "flex", alignItems: "center", gap: 4, color: "#4F46E5", fontWeight: 500 }}>
+                <Star style={{ width: 13, height: 13 }} fill="currentColor" />
                 {(user?.xp ?? 0).toLocaleString()} XP
               </span>
             </div>
-            <button className="relative p-2 text-slate-400 hover:text-slate-600 transition-colors">
-              <Bell className="w-5 h-5" />
-              <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full border-2 border-white" />
+            <button style={{
+              padding: 6, borderRadius: 8,
+              background: "none", border: "none", cursor: "pointer",
+              color: "var(--color-text-tertiary)", position: "relative",
+            }}>
+              <Bell style={{ width: 18, height: 18 }} />
             </button>
           </div>
         </header>
-        <div className="flex-1 overflow-y-auto">{children}</div>
+
+        <div style={{ flex: 1, overflowY: "auto" }}>{children}</div>
       </main>
+
+      {toast && <XPToast xp={toast} onDone={() => {}} />}
     </div>
   );
 }
 
-// ── Dashboard ──────────────────────────────────────────────────
+// ── Dashboard ──────────────────────────────────────────────────────────────────
 function Dashboard({ setPage, user }) {
   const [resources, setResources] = useState([]);
   const [heatmap, setHeatmap]     = useState({});
@@ -118,9 +203,7 @@ function Dashboard({ setPage, user }) {
   }, []);
 
   const inProgress = resources.filter(r => r.status === "in-progress");
-  const xpPct = user
-    ? Math.round((user.xp / (user.xp_to_next || 3000)) * 100)
-    : 0;
+  const xpPct = user ? Math.round((user.xp / ((user.xp || 0) + (user.xp_to_next || 968))) * 100) : 0;
 
   const platformTotals = inProgress.reduce((acc, r) => {
     acc[r.platform] = acc[r.platform]
@@ -144,94 +227,108 @@ function Dashboard({ setPage, user }) {
 
   const firstName = user?.name?.split(" ")[0] ?? "there";
 
+  const card = (v, label, sub) => (
+    <div key={label} style={{
+      background: "var(--color-background-primary)",
+      border: "0.5px solid var(--color-border-tertiary)",
+      borderRadius: "var(--border-radius-lg)", padding: "16px",
+    }}>
+      <p style={{ margin: "0 0 3px", fontSize: 22, fontWeight: 500 }}>{v}</p>
+      <p style={{ margin: "0 0 2px", fontSize: 12, fontWeight: 500, color: "var(--color-text-secondary)" }}>{label}</p>
+      <p style={{ margin: 0, fontSize: 11, color: "var(--color-text-tertiary)" }}>{sub}</p>
+    </div>
+  );
+
   return (
-    <div className="p-6 max-w-6xl mx-auto w-full space-y-6">
-      <div className="relative bg-gradient-to-r from-indigo-900 to-purple-900 rounded-3xl p-7 overflow-hidden">
-        <h1 className="text-2xl font-bold text-white mb-1">
+    <div style={{ padding: "24px", maxWidth: 960, margin: "0 auto" }}>
+      {/* Hero */}
+      <div style={{
+        background: "linear-gradient(135deg, #1e1b4b 0%, #312e81 60%, #4c1d95 100%)",
+        borderRadius: "var(--border-radius-lg)", padding: "28px 32px", marginBottom: 20, color: "white",
+      }}>
+        <h1 style={{ margin: "0 0 4px", fontSize: 22, fontWeight: 500 }}>
           Good morning, {firstName}! 👋
         </h1>
-        <p className="text-indigo-200 text-sm mb-5 max-w-md">
+        <p style={{ margin: "0 0 20px", opacity: 0.7, fontSize: 13 }}>
           {inProgress.length} course{inProgress.length !== 1 ? "s" : ""} in progress.
         </p>
-        <div className="max-w-xs">
-          <div className="flex justify-between text-xs text-indigo-300 mb-1">
+        <div style={{ maxWidth: 320 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, opacity: 0.7, marginBottom: 5 }}>
             <span>Level {user?.level ?? 1}</span>
-            <span>{user?.xp ?? 0} / {user?.xp_to_next ?? 3000} XP</span>
+            <span>{(user?.xp ?? 0).toLocaleString()} / {((user?.xp ?? 0) + (user?.xp_to_next ?? 968)).toLocaleString()} XP</span>
           </div>
-          <div className="w-full bg-white/20 rounded-full h-2">
-            <div className="bg-white h-2 rounded-full transition-all" style={{ width: `${xpPct}%` }} />
+          <div style={{ height: 7, background: "rgba(255,255,255,0.2)", borderRadius: 8, overflow: "hidden" }}>
+            <div style={{ width: `${xpPct}%`, height: "100%", background: "rgba(255,255,255,0.9)", borderRadius: 8, transition: "width 0.5s" }} />
           </div>
         </div>
       </div>
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        {[
-          { label: "Courses active",  value: inProgress.length,    sub: "in progress" },
-          { label: "Completed",       value: resources.filter(r => r.status === "completed").length, sub: "resources" },
-          { label: "Streak",          value: `${user?.streak ?? 0}d`, sub: "keep it up!" },
-          { label: "Level",           value: user?.level ?? 1,       sub: "current level" },
-        ].map(m => (
-          <div key={m.label} className="bg-white border border-slate-200 rounded-2xl p-4">
-            <p className="text-2xl font-bold text-slate-900">{m.value}</p>
-            <p className="text-xs font-medium text-slate-500 mt-0.5">{m.label}</p>
-            <p className="text-[11px] text-slate-400 mt-0.5">{m.sub}</p>
-          </div>
-        ))}
+      {/* Stats */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 20 }}>
+        {card(inProgress.length, "Courses active", "in progress")}
+        {card(resources.filter(r => r.status === "completed").length, "Completed", "resources")}
+        {card(`${user?.streak ?? 0}d`, "Streak", "keep it up!")}
+        {card(user?.level ?? 1, "Level", "current level")}
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 bg-white border border-slate-200 rounded-2xl p-5">
-          <p className="text-sm font-bold text-slate-900 mb-4">Activity — last 12 weeks</p>
-          <div className="grid gap-[3px]" style={{ gridTemplateColumns: "repeat(12, 1fr)" }}>
+      {/* Heatmap + Platform */}
+      <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 16, marginBottom: 16 }}>
+        <div style={{
+          background: "var(--color-background-primary)",
+          border: "0.5px solid var(--color-border-tertiary)",
+          borderRadius: "var(--border-radius-lg)", padding: "18px",
+        }}>
+          <p style={{ margin: "0 0 14px", fontSize: 13, fontWeight: 500 }}>Activity — last 12 weeks</p>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gap: 3 }}>
             {heatmapCells.map((v, i) => (
-              <div key={i} className="aspect-square rounded-[2px]" style={{
-                background: v === 0 ? "#F1F5F9" : v === 1 ? "#C7D2FE" : v === 2 ? "#818CF8" : "#4338CA",
+              <div key={i} style={{
+                aspectRatio: "1", borderRadius: 2,
+                background: v === 0 ? "var(--color-background-secondary)" : v === 1 ? "#C7D2FE" : v === 2 ? "#818CF8" : "#4338CA",
               }} />
             ))}
           </div>
-          <div className="flex items-center gap-2 mt-3 text-[10px] text-slate-400">
-            <span>Less</span>
-            {["#F1F5F9","#C7D2FE","#818CF8","#4338CA"].map(c => (
-              <span key={c} className="w-3 h-3 rounded-[2px] inline-block" style={{ background: c }} />
-            ))}
-            <span>More</span>
-          </div>
         </div>
 
-        <div className="bg-white border border-slate-200 rounded-2xl p-5">
-          <p className="text-sm font-bold text-slate-900 mb-4">Platform progress</p>
-          {Object.keys(platformTotals).length === 0 ? (
-            <p className="text-xs text-slate-400">No resources yet.</p>
-          ) : (
-            <div className="space-y-3">
-              {Object.entries(platformTotals).map(([platform, pct]) => (
-                <div key={platform}>
-                  <div className="flex justify-between text-xs text-slate-600 mb-1">
-                    <span className="font-medium">{platform}</span>
-                    <span>{pct}%</span>
-                  </div>
-                  <div className="w-full bg-slate-100 rounded-full h-2">
-                    <div className="h-2 rounded-full transition-all"
-                      style={{ width: `${pct}%`, background: platformColors[platform] ?? "#6366F1" }} />
-                  </div>
+        <div style={{
+          background: "var(--color-background-primary)",
+          border: "0.5px solid var(--color-border-tertiary)",
+          borderRadius: "var(--border-radius-lg)", padding: "18px",
+        }}>
+          <p style={{ margin: "0 0 14px", fontSize: 13, fontWeight: 500 }}>Platform progress</p>
+          {Object.keys(platformTotals).length === 0
+            ? <p style={{ fontSize: 12, color: "var(--color-text-tertiary)" }}>No resources yet.</p>
+            : Object.entries(platformTotals).map(([p, pct]) => (
+              <div key={p} style={{ marginBottom: 10 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginBottom: 3 }}>
+                  <span style={{ color: "var(--color-text-secondary)", fontWeight: 500 }}>{p}</span>
+                  <span style={{ color: "var(--color-text-tertiary)" }}>{pct}%</span>
                 </div>
-              ))}
-            </div>
-          )}
+                <div style={{ height: 5, background: "var(--color-background-secondary)", borderRadius: 4, overflow: "hidden" }}>
+                  <div style={{ width: `${pct}%`, height: "100%", background: platformColors[p] ?? "#4F46E5", borderRadius: 4 }} />
+                </div>
+              </div>
+            ))
+          }
         </div>
       </div>
 
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+      {/* Quick actions */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
         {[
-          { label: "My learning",   page: "my-learning",     Icon: BookOpen,  color: "bg-blue-50 text-blue-700"     },
-          { label: "Recommended",   page: "recommendations", Icon: Sparkles,  color: "bg-purple-50 text-purple-700" },
-          { label: "Flashcards",    page: "flashcards",      Icon: Layers,    color: "bg-indigo-50 text-indigo-700" },
-          { label: "Study buddies", page: "buddies",         Icon: Users,     color: "bg-green-50 text-green-700"   },
-        ].map(({ label, page, Icon, color }) => (
-          <button key={page} onClick={() => setPage(page)}
-            className={`flex flex-col items-center gap-2 p-5 rounded-2xl border border-slate-200 hover:shadow-sm transition-all ${color}`}>
-            <Icon className="w-6 h-6" />
-            <span className="text-xs font-semibold">{label}</span>
+          { label: "My learning",   page: "my-learning",     emoji: "📚" },
+          { label: "Recommended",   page: "recommendations", emoji: "✨" },
+          { label: "Analytics",     page: "analytics",       emoji: "📊" },
+        ].map(({ label, page, emoji }) => (
+          <button key={page} onClick={() => setPage(page)} style={{
+            display: "flex", flexDirection: "column", alignItems: "center", gap: 6,
+            padding: "16px", borderRadius: "var(--border-radius-lg)",
+            border: "0.5px solid var(--color-border-tertiary)",
+            background: "var(--color-background-primary)",
+            cursor: "pointer", transition: "all 0.15s", fontSize: 13, fontWeight: 500,
+            color: "var(--color-text-secondary)",
+          }}>
+            <span style={{ fontSize: 22 }}>{emoji}</span>
+            {label}
           </button>
         ))}
       </div>
@@ -239,143 +336,122 @@ function Dashboard({ setPage, user }) {
   );
 }
 
-// ── Rewards ────────────────────────────────────────────────────
-function Rewards({ user }) {
-  const xpPct = user
-    ? Math.round((user.xp / (user.xp_to_next || 3000)) * 100)
-    : 0;
-
-  return (
-    <div className="p-8 max-w-3xl mx-auto w-full">
-      <div className="bg-gradient-to-br from-amber-400 to-orange-500 rounded-3xl p-8 text-white mb-6">
-        <Trophy className="w-10 h-10 mb-4 opacity-90" />
-        <h2 className="text-2xl font-bold mb-1">Next reward unlock</h2>
-        <p className="text-orange-100 mb-5">Spotify Premium (1 month)</p>
-        <div className="flex justify-between text-sm font-bold mb-2">
-          <span>{(user?.xp ?? 0).toLocaleString()} XP</span>
-          <span>{(user?.xp_to_next ?? 3000).toLocaleString()} XP</span>
-        </div>
-        <div className="w-full bg-black/20 rounded-full h-3">
-          <div className="bg-white h-3 rounded-full transition-all" style={{ width: `${xpPct}%` }} />
-        </div>
-        <p className="text-xs text-orange-100 mt-2">
-          {(user?.xp_to_next ?? 3000) - (user?.xp ?? 0)} XP to go
-        </p>
-      </div>
-      <p className="text-center text-sm text-slate-400">More reward tiers coming soon…</p>
-    </div>
-  );
-}
-
-// ── Shared Auth Layout ─────────────────────────────────────────
+// ── Auth Layout ────────────────────────────────────────────────────────────────
 function AuthLayout({ children }) {
   return (
-    <div className="min-h-screen w-full flex bg-white font-sans text-slate-900">
-      {/* Left panel */}
-      <div className="hidden lg:flex lg:w-1/2 relative bg-slate-950 overflow-hidden flex-col justify-between p-12">
-        <div className="relative z-10 flex items-center gap-3">
-          <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center">
-            <Zap className="w-5 h-5 text-white" fill="currentColor" />
+    <div style={{ minHeight: "100vh", display: "flex", background: "var(--color-background-primary)" }}>
+      <div style={{
+        width: "45%", background: "#0f0e17", display: "flex", flexDirection: "column",
+        justifyContent: "space-between", padding: "48px",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{
+            width: 32, height: 32, borderRadius: 9,
+            background: "linear-gradient(135deg, #4F46E5, #7C3AED)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+          }}>
+            <Zap style={{ width: 16, height: 16, color: "white" }} fill="white" />
           </div>
-          <span className="text-2xl font-bold tracking-tight text-white">SkillOS</span>
+          <span style={{ fontSize: 20, fontWeight: 700, color: "white" }}>SkillOS</span>
         </div>
-        <div className="relative z-10 mb-20">
-          <h1 className="text-5xl font-extrabold text-white leading-tight mb-4">
-            Upgrade your <br />
-            <span className="text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 to-purple-400">
+        <div style={{ marginBottom: 80 }}>
+          <h1 style={{
+            fontSize: 44, fontWeight: 700, color: "white", lineHeight: 1.15, margin: "0 0 16px",
+          }}>
+            Upgrade your<br />
+            <span style={{
+              background: "linear-gradient(90deg, #818CF8, #A78BFA)",
+              WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
+            }}>
               human potential.
             </span>
           </h1>
-          <p className="text-lg text-slate-400 max-w-md leading-relaxed">
+          <p style={{ fontSize: 16, color: "rgba(255,255,255,0.5)", maxWidth: 360, lineHeight: 1.6, margin: 0 }}>
             The unified operating system for self-directed learners.
           </p>
         </div>
-        <div className="relative z-10 text-sm text-slate-500">
-          <span>© 2026 SkillOS</span>
-        </div>
+        <p style={{ fontSize: 12, color: "rgba(255,255,255,0.3)" }}>© 2026 SkillOS</p>
       </div>
-
-      {/* Right panel */}
-      <div className="w-full lg:w-1/2 flex items-center justify-center p-8 sm:p-12 lg:p-24">
-        <div className="w-full max-w-md">{children}</div>
+      <div style={{
+        flex: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: "48px",
+      }}>
+        <div style={{ width: "100%", maxWidth: 400 }}>{children}</div>
       </div>
     </div>
   );
 }
 
-// ── Login ──────────────────────────────────────────────────────
+// ── Login ──────────────────────────────────────────────────────────────────────
 function Login({ onLogin, onGoRegister }) {
-  const [showPw, setShowPw]   = useState(false);
-  const [email, setEmail]     = useState("");
-  const [pw, setPw]           = useState("");
-  const [error, setError]     = useState("");
+  const [showPw, setShowPw] = useState(false);
+  const [email, setEmail]   = useState("");
+  const [pw, setPw]         = useState("");
+  const [error, setError]   = useState("");
   const [loading, setLoading] = useState(false);
 
   async function handleSubmit(e) {
-    e.preventDefault();
-    setError("");
-    setLoading(true);
+    e.preventDefault(); setError(""); setLoading(true);
     try {
       const data = await api.login(email, pw);
       localStorage.setItem("skillos_token", data.access_token);
       onLogin();
-    } catch {
-      setError("Invalid email or password. Please try again.");
-    } finally {
-      setLoading(false);
-    }
+    } catch { setError("Invalid email or password."); }
+    finally { setLoading(false); }
   }
+
+  const inp = {
+    width: "100%", padding: "10px 12px 10px 36px", fontSize: 13,
+    border: "0.5px solid var(--color-border-secondary)",
+    borderRadius: "var(--border-radius-md)",
+    background: "var(--color-background-secondary)",
+    color: "var(--color-text-primary)", outline: "none",
+  };
 
   return (
     <AuthLayout>
-      <div className="mb-8">
-        <h2 className="text-3xl font-bold text-slate-900 mb-2">Welcome back</h2>
-        <p className="text-slate-500">Sign in to continue your learning journey.</p>
+      <div style={{ marginBottom: 28 }}>
+        <h2 style={{ margin: "0 0 6px", fontSize: 24, fontWeight: 500 }}>Welcome back</h2>
+        <p style={{ margin: 0, fontSize: 13, color: "var(--color-text-secondary)" }}>
+          Sign in to continue your learning journey.
+        </p>
       </div>
-
       {error && (
-        <div className="mb-4 px-4 py-3 bg-red-50 text-red-600 text-sm rounded-xl border border-red-200">
-          {error}
-        </div>
+        <div style={{
+          marginBottom: 16, padding: "10px 14px", borderRadius: "var(--border-radius-md)",
+          background: "var(--color-background-danger)", color: "var(--color-text-danger)", fontSize: 13,
+          border: "0.5px solid var(--color-border-danger)",
+        }}>{error}</div>
       )}
-
-      <form onSubmit={handleSubmit} className="space-y-4">
+      <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         <div>
-          <label className="block text-sm font-medium text-slate-700 mb-1.5">Email</label>
-          <div className="relative">
-            <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-            <input
-              type="email" value={email} onChange={e => setEmail(e.target.value)} required
-              placeholder="you@example.com"
-              className="w-full pl-9 pr-3 py-2.5 text-sm border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-indigo-400 transition"
-            />
+          <label style={{ display: "block", fontSize: 12, fontWeight: 500, marginBottom: 6, color: "var(--color-text-secondary)" }}>Email</label>
+          <div style={{ position: "relative" }}>
+            <Mail style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", width: 14, height: 14, color: "var(--color-text-tertiary)" }} />
+            <input type="email" value={email} onChange={e => setEmail(e.target.value)} required placeholder="you@example.com" style={inp} />
           </div>
         </div>
         <div>
-          <label className="block text-sm font-medium text-slate-700 mb-1.5">Password</label>
-          <div className="relative">
-            <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-            <input
-              type={showPw ? "text" : "password"} value={pw}
-              onChange={e => setPw(e.target.value)} required placeholder="••••••••"
-              className="w-full pl-9 pr-10 py-2.5 text-sm border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-indigo-400 transition"
-            />
-            <button type="button" onClick={() => setShowPw(p => !p)}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
-              {showPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+          <label style={{ display: "block", fontSize: 12, fontWeight: 500, marginBottom: 6, color: "var(--color-text-secondary)" }}>Password</label>
+          <div style={{ position: "relative" }}>
+            <Lock style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", width: 14, height: 14, color: "var(--color-text-tertiary)" }} />
+            <input type={showPw ? "text" : "password"} value={pw} onChange={e => setPw(e.target.value)} required placeholder="••••••••" style={{ ...inp, paddingRight: 36 }} />
+            <button type="button" onClick={() => setShowPw(p => !p)} style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", color: "var(--color-text-tertiary)", padding: 0 }}>
+              {showPw ? <EyeOff style={{ width: 14, height: 14 }} /> : <Eye style={{ width: 14, height: 14 }} />}
             </button>
           </div>
         </div>
-        <button type="submit" disabled={loading}
-          className="w-full flex items-center justify-center gap-2 py-3 bg-slate-900 text-white text-sm font-semibold rounded-xl hover:bg-slate-800 transition-all active:scale-[0.98] disabled:opacity-60">
-          {loading ? "Signing in…" : <><span>Sign in</span><ArrowRight className="w-4 h-4" /></>}
+        <button type="submit" disabled={loading} style={{
+          width: "100%", padding: "11px", background: "#0f0e17", color: "white",
+          border: "none", borderRadius: "var(--border-radius-md)", fontSize: 13, fontWeight: 500,
+          cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+          opacity: loading ? 0.6 : 1,
+        }}>
+          {loading ? "Signing in…" : <><span>Sign in</span><ArrowRight style={{ width: 14, height: 14 }} /></>}
         </button>
       </form>
-
-      <p className="mt-8 text-center text-sm text-slate-500">
+      <p style={{ marginTop: 24, textAlign: "center", fontSize: 13, color: "var(--color-text-secondary)" }}>
         No account?{" "}
-        <button onClick={onGoRegister}
-          className="font-semibold text-indigo-600 hover:text-indigo-500 transition-colors">
+        <button onClick={onGoRegister} style={{ background: "none", border: "none", cursor: "pointer", color: "#4F46E5", fontWeight: 500, fontSize: 13, padding: 0 }}>
           Create one for free
         </button>
       </p>
@@ -383,133 +459,90 @@ function Login({ onLogin, onGoRegister }) {
   );
 }
 
-// ── Register ───────────────────────────────────────────────────
+// ── Register ───────────────────────────────────────────────────────────────────
 function Register({ onLogin, onGoLogin }) {
-  const [showPw, setShowPw]     = useState(false);
-  const [name, setName]         = useState("");
-  const [email, setEmail]       = useState("");
-  const [pw, setPw]             = useState("");
+  const [showPw, setShowPw]       = useState(false);
+  const [name, setName]           = useState("");
+  const [email, setEmail]         = useState("");
+  const [pw, setPw]               = useState("");
   const [pwConfirm, setPwConfirm] = useState("");
-  const [error, setError]       = useState("");
-  const [loading, setLoading]   = useState(false);
+  const [error, setError]         = useState("");
+  const [loading, setLoading]     = useState(false);
 
   async function handleSubmit(e) {
-    e.preventDefault();
-    setError("");
-
-    if (pw !== pwConfirm) {
-      setError("Passwords do not match.");
-      return;
-    }
-    if (pw.length < 6) {
-      setError("Password must be at least 6 characters.");
-      return;
-    }
-
+    e.preventDefault(); setError("");
+    if (pw !== pwConfirm) { setError("Passwords do not match."); return; }
+    if (pw.length < 6) { setError("Password must be at least 6 characters."); return; }
     setLoading(true);
     try {
       const data = await api.register(name, email, pw);
       localStorage.setItem("skillos_token", data.access_token);
       onLogin();
     } catch (err) {
-      const msg = err.message ?? "";
-      if (msg.includes("already registered")) {
-        setError("That email is already registered. Try signing in.");
-      } else {
-        setError("Something went wrong. Please try again.");
-      }
-    } finally {
-      setLoading(false);
-    }
+      setError(err.message?.includes("already registered") ? "That email is already registered." : "Something went wrong. Please try again.");
+    } finally { setLoading(false); }
   }
+
+  const inp = {
+    width: "100%", padding: "10px 12px 10px 36px", fontSize: 13,
+    border: "0.5px solid var(--color-border-secondary)",
+    borderRadius: "var(--border-radius-md)",
+    background: "var(--color-background-secondary)",
+    color: "var(--color-text-primary)", outline: "none",
+  };
 
   return (
     <AuthLayout>
-      <div className="mb-8">
-        <h2 className="text-3xl font-bold text-slate-900 mb-2">Create your account</h2>
-        <p className="text-slate-500">Start your learning journey today — it's free.</p>
+      <div style={{ marginBottom: 28 }}>
+        <h2 style={{ margin: "0 0 6px", fontSize: 24, fontWeight: 500 }}>Create your account</h2>
+        <p style={{ margin: 0, fontSize: 13, color: "var(--color-text-secondary)" }}>Start your learning journey today — it's free.</p>
       </div>
-
       {error && (
-        <div className="mb-4 px-4 py-3 bg-red-50 text-red-600 text-sm rounded-xl border border-red-200">
-          {error}
-        </div>
+        <div style={{ marginBottom: 16, padding: "10px 14px", borderRadius: "var(--border-radius-md)", background: "var(--color-background-danger)", color: "var(--color-text-danger)", fontSize: 13 }}>{error}</div>
       )}
-
-      <form onSubmit={handleSubmit} className="space-y-4">
-        {/* Name */}
-        <div>
-          <label className="block text-sm font-medium text-slate-700 mb-1.5">Full name</label>
-          <div className="relative">
-            <User className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-            <input
-              type="text" value={name} onChange={e => setName(e.target.value)} required
-              placeholder="Jane Smith"
-              className="w-full pl-9 pr-3 py-2.5 text-sm border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-indigo-400 transition"
-            />
+      <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {[
+          { label: "Full name", type: "text", val: name, set: setName, ph: "Jane Smith", Icon: User },
+          { label: "Email",     type: "email", val: email, set: setEmail, ph: "you@example.com", Icon: Mail },
+        ].map(({ label, type, val, set, ph, Icon: I }) => (
+          <div key={label}>
+            <label style={{ display: "block", fontSize: 12, fontWeight: 500, marginBottom: 5, color: "var(--color-text-secondary)" }}>{label}</label>
+            <div style={{ position: "relative" }}>
+              <I style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", width: 14, height: 14, color: "var(--color-text-tertiary)" }} />
+              <input type={type} value={val} onChange={e => set(e.target.value)} required placeholder={ph} style={inp} />
+            </div>
           </div>
-        </div>
-
-        {/* Email */}
-        <div>
-          <label className="block text-sm font-medium text-slate-700 mb-1.5">Email</label>
-          <div className="relative">
-            <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-            <input
-              type="email" value={email} onChange={e => setEmail(e.target.value)} required
-              placeholder="you@example.com"
-              className="w-full pl-9 pr-3 py-2.5 text-sm border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-indigo-400 transition"
-            />
+        ))}
+        {[
+          { label: "Password", val: pw, set: setPw, ph: "Min. 6 characters" },
+          { label: "Confirm password", val: pwConfirm, set: setPwConfirm, ph: "Re-enter password" },
+        ].map(({ label, val, set, ph }) => (
+          <div key={label}>
+            <label style={{ display: "block", fontSize: 12, fontWeight: 500, marginBottom: 5, color: "var(--color-text-secondary)" }}>{label}</label>
+            <div style={{ position: "relative" }}>
+              <Lock style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", width: 14, height: 14, color: "var(--color-text-tertiary)" }} />
+              <input type={showPw ? "text" : "password"} value={val} onChange={e => set(e.target.value)} required placeholder={ph}
+                style={{ ...inp, paddingRight: 36, borderColor: (label.includes("Confirm") && pwConfirm && pw !== pwConfirm) ? "var(--color-border-danger)" : undefined }} />
+              {label === "Password" && (
+                <button type="button" onClick={() => setShowPw(p => !p)} style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", color: "var(--color-text-tertiary)", padding: 0 }}>
+                  {showPw ? <EyeOff style={{ width: 14, height: 14 }} /> : <Eye style={{ width: 14, height: 14 }} />}
+                </button>
+              )}
+            </div>
           </div>
-        </div>
-
-        {/* Password */}
-        <div>
-          <label className="block text-sm font-medium text-slate-700 mb-1.5">Password</label>
-          <div className="relative">
-            <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-            <input
-              type={showPw ? "text" : "password"} value={pw}
-              onChange={e => setPw(e.target.value)} required placeholder="Min. 6 characters"
-              className="w-full pl-9 pr-10 py-2.5 text-sm border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-indigo-400 transition"
-            />
-            <button type="button" onClick={() => setShowPw(p => !p)}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
-              {showPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-            </button>
-          </div>
-        </div>
-
-        {/* Confirm Password */}
-        <div>
-          <label className="block text-sm font-medium text-slate-700 mb-1.5">Confirm password</label>
-          <div className="relative">
-            <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-            <input
-              type={showPw ? "text" : "password"} value={pwConfirm}
-              onChange={e => setPwConfirm(e.target.value)} required placeholder="Re-enter password"
-              className={`w-full pl-9 pr-3 py-2.5 text-sm border rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-indigo-400 transition ${
-                pwConfirm && pw !== pwConfirm
-                  ? "border-red-300 focus:ring-red-300"
-                  : "border-slate-200"
-              }`}
-            />
-          </div>
-          {pwConfirm && pw !== pwConfirm && (
-            <p className="text-xs text-red-500 mt-1">Passwords don't match</p>
-          )}
-        </div>
-
-        <button type="submit" disabled={loading}
-          className="w-full flex items-center justify-center gap-2 py-3 bg-indigo-600 text-white text-sm font-semibold rounded-xl hover:bg-indigo-700 transition-all active:scale-[0.98] disabled:opacity-60 mt-2">
-          {loading ? "Creating account…" : <><span>Create account</span><ArrowRight className="w-4 h-4" /></>}
+        ))}
+        <button type="submit" disabled={loading} style={{
+          width: "100%", padding: "11px", background: "#4F46E5", color: "white",
+          border: "none", borderRadius: "var(--border-radius-md)", fontSize: 13, fontWeight: 500,
+          cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+          opacity: loading ? 0.6 : 1, marginTop: 4,
+        }}>
+          {loading ? "Creating…" : <><span>Create account</span><ArrowRight style={{ width: 14, height: 14 }} /></>}
         </button>
       </form>
-
-      <p className="mt-8 text-center text-sm text-slate-500">
+      <p style={{ marginTop: 20, textAlign: "center", fontSize: 13, color: "var(--color-text-secondary)" }}>
         Already have an account?{" "}
-        <button onClick={onGoLogin}
-          className="font-semibold text-indigo-600 hover:text-indigo-500 transition-colors">
+        <button onClick={onGoLogin} style={{ background: "none", border: "none", cursor: "pointer", color: "#4F46E5", fontWeight: 500, fontSize: 13, padding: 0 }}>
           Sign in
         </button>
       </p>
@@ -517,32 +550,29 @@ function Register({ onLogin, onGoLogin }) {
   );
 }
 
-// ── Root App ───────────────────────────────────────────────────
+// ── Root App ───────────────────────────────────────────────────────────────────
 export default function App() {
   const [loggedIn, setLoggedIn] = useState(!!localStorage.getItem("skillos_token"));
-  const [authPage, setAuthPage] = useState("login"); // "login" | "register"
+  const [authPage, setAuthPage] = useState("login");
   const [user, setUser]         = useState(null);
   const [page, setPage]         = useState("dashboard");
+  const [toast, setToast]       = useState(null);
+
+  const refreshUser = useCallback(() => {
+    api.me().then(setUser).catch(() => {
+      localStorage.removeItem("skillos_token");
+      setLoggedIn(false);
+    });
+  }, []);
 
   useEffect(() => {
-    if (loggedIn) {
-      api.me().then(setUser).catch(() => {
-        localStorage.removeItem("skillos_token");
-        setLoggedIn(false);
-      });
-    }
-  }, [loggedIn]);
+    if (loggedIn) refreshUser();
+  }, [loggedIn, refreshUser]);
 
-  function handleLogin() {
-    setLoggedIn(true);
-    setAuthPage("login");
-  }
-
+  function handleLogin() { setLoggedIn(true); setAuthPage("login"); }
   function handleLogout() {
     localStorage.removeItem("skillos_token");
-    setLoggedIn(false);
-    setUser(null);
-    setPage("dashboard");
+    setLoggedIn(false); setUser(null); setPage("dashboard");
   }
 
   if (!loggedIn) {
@@ -553,15 +583,16 @@ export default function App() {
 
   const pageEl = {
     "dashboard":       <Dashboard setPage={setPage} user={user} />,
-    "my-learning":     <MyLearning />,
+    "my-learning":     <MyLearning onXP={() => refreshUser()} />,
     "recommendations": <Recommendations />,
-    "flashcards":      <Flashcards />,
+    "flashcards":      <Flashcards onXP={() => refreshUser()} />,
     "buddies":         <StudyBuddies />,
+    "analytics":       <Analytics />,
     "rewards":         <Rewards user={user} />,
   }[page] ?? <Dashboard setPage={setPage} user={user} />;
 
   return (
-    <Shell page={page} setPage={setPage} onLogout={handleLogout} user={user}>
+    <Shell page={page} setPage={setPage} onLogout={handleLogout} user={user} toast={toast}>
       {pageEl}
     </Shell>
   );
