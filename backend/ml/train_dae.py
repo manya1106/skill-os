@@ -22,7 +22,7 @@ import os
 import json
 import numpy as np
 import pandas as pd
-
+from typing import Optional, List
 
 # ─── 1. Load interaction data from Supabase ───────────────────────────────
 
@@ -216,7 +216,7 @@ class DAERecommender:
         return self.model is not None
 
     def recommend(self, user_id: str, top_n: int = 6,
-                  tfidf_weight: float = 0.3) -> list[dict] | None:
+                  tfidf_weight: float = 0.3) -> Optional[List[dict]]:
         """
         Returns top_n item indices for user_id.
         Returns None if model not loaded (triggers TF-IDF fallback in Flask).

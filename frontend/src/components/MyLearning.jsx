@@ -78,7 +78,7 @@ export default function MyLearning() {
 
   async function deleteResource(id) {
     try {
-      await api.updateResource(id, { status: "deleted" }); // soft approach
+      await api.deleteResource(id);
       setResources(prev => prev.filter(r => r.id !== id));
     } catch (err) {
       // fallback: just remove from local state

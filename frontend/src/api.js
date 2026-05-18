@@ -5,15 +5,34 @@ function getToken() {
 }
 
 async function req(path, options = {}) {
+  // Don't force JSON content-type — let callers override it fully
+  const defaultHeaders = {
+    ...(getToken() ? { Authorization: `Bearer ${getToken()}` } : {}),
+  };
+
+  // Only add Content-Type: application/json when there's a JSON body
+  // (not for form-encoded login, not for DELETE with no body)
+  const hasJsonBody =
+    options.body && typeof options.body === "string";
+  if (hasJsonBody) {
+    defaultHeaders["Content-Type"] = "application/json";
+  }
+
   const res = await fetch(`${BASE}${path}`, {
     ...options,
     headers: {
-      "Content-Type": "application/json",
-      ...(getToken() ? { Authorization: `Bearer ${getToken()}` } : {}),
-      ...options.headers,
+      ...defaultHeaders,
+      ...options.headers, // caller headers win
     },
   });
-  if (!res.ok) throw new Error(await res.text());
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text);
+  }
+
+  // 204 No Content has no body
+  if (res.status === 204) return null;
   return res.json();
 }
 
@@ -26,7 +45,10 @@ export const api = {
       body: new URLSearchParams({ username: email, password }),
     }),
   register: (name, email, password) =>
-    req("/auth/register", { method: "POST", body: JSON.stringify({ name, email, password }) }),
+    req("/auth/register", {
+      method: "POST",
+      body: JSON.stringify({ name, email, password }),
+    }),
 
   // ── User ──────────────────────────────────────────────────────────────────
   me: () => req("/users/me"),
@@ -50,10 +72,10 @@ export const api = {
   // ── Activity ──────────────────────────────────────────────────────────────
   heatmap: () => req("/activity/heatmap"),
 
-  // ── Analytics (real data) ─────────────────────────────────────────────────
-  weeklyAnalytics:  () => req("/analytics/weekly"),
-  platformRadar:    () => req("/analytics/platform-radar"),
-  forgettingCurve:  () => req("/analytics/forgetting-curve"),
+  // ── Analytics ─────────────────────────────────────────────────────────────
+  weeklyAnalytics: () => req("/analytics/weekly"),
+  platformRadar:   () => req("/analytics/platform-radar"),
+  forgettingCurve: () => req("/analytics/forgetting-curve"),
 
   // ── ML recommendations ────────────────────────────────────────────────────
   recommendations: () => req("/recommendations"),
