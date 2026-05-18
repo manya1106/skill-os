@@ -83,6 +83,18 @@ export const api = {
   recommendationFeedback: (data) =>
     req("/recommendations/feedback", { method: "POST", body: JSON.stringify(data) }),
 
+  // ── Goals & Learning Paths ────────────────────────────────────────
+  createGoal: (data) =>
+    req("/goals", { method: "POST", body: JSON.stringify(data) }),
+  listGoals: () => req("/goals"),
+  getGoal: (id) => req(`/goals/${id}`),
+  updateGoal: (id, data) =>
+    req(`/goals/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+  
+  updatePreferences: (data) =>
+    req("/preferences", { method: "POST", body: JSON.stringify(data) }),
+  getPreferences: () => req("/preferences"),
+
   // ── Study buddies ─────────────────────────────────────────────────────────
   buddyMatches:     ()      => req("/buddies/matches"),
   sendBuddyRequest: (toId)  =>

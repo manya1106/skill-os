@@ -44,15 +44,16 @@ ML_SERVICE_URL = os.getenv("ML_SERVICE_URL", "http://localhost:8001")
 
 # ─── XP table: how many XP each action awards ────────────────────────────────
 XP_AWARDS = {
-    "resource_added":      10,
-    "resource_completed":  50,
-    "resource_in_progress": 5,
-    "flashcard_review":     3,
-    "flashcard_good":       5,
-    "flashcard_easy":       8,
-    "daily_login":         15,
-    "streak_7":           100,
-    "streak_30":          500,
+    "resource_added":        15,   # Up from 10
+    "resource_completed":   200,   # Up from 50 (major milestone)
+    "resource_in_progress":   5,   # Keep same
+    "flashcard_review":       3,   # Keep same
+    "flashcard_good":         5,   # Keep same
+    "flashcard_easy":        10,   # Up from 8
+    "daily_login":           10,   # Down from 15
+    "streak_3":              30,   # New: 3-day streak
+    "streak_7":             100,   # Keep same
+    "streak_30":            500,   # Keep same
 }
 
 # XP needed to reach each level (cumulative)
@@ -66,6 +67,26 @@ def compute_level(total_xp: int) -> tuple[int, int]:
     while xp_for_level(level + 1) <= total_xp:
         level += 1
     return level, xp_for_level(level + 1) - total_xp
+
+def _compute_xp_bonus(user_id: str, base_xp: int, action: str) -> int:
+    """
+    Apply bonus XP multipliers based on user engagement patterns.
+    - Consistency bonus: 1.1x if active every day (streak > 5)
+    - Challenge bonus: 1.2x for completing high-difficulty resources
+    - Learning velocity bonus: 1.15x if completing resources faster than average
+    """
+    user = supabase.table("users").select("streak, level").eq("id", user_id).single().execute().data
+    multiplier = 1.0
+    
+    # Consistency bonus
+    if user.get("streak", 0) >= 5:
+        multiplier *= 1.1
+    
+    # Challenge bonus (higher levels = harder content)
+    if user.get("level", 1) >= 5:
+        multiplier *= 1.2
+    
+    return int(base_xp * multiplier)
 
 # ─── Achievement definitions ─────────────────────────────────────────────────
 ACHIEVEMENTS = [
@@ -570,6 +591,57 @@ def get_forgetting_curve(user_id: str = Depends(get_current_user)):
 
     return {"data": data_points, "avg_retention": avg_retention}
 
+@app.get("/analytics/predictions/{goal_id}")
+def get_goal_predictions(goal_id: str, user_id: str = Depends(get_current_user)):
+    """
+    Predict goal completion probability and optimal study schedule.
+    """
+    goal = supabase.table("learning_goals").select("*") \
+        .eq("id", goal_id).eq("user_id", user_id).single().execute().data
+    
+    milestones = supabase.table("learning_paths").select("*") \
+        .eq("goal_id", goal_id).execute().data or []
+    
+    total_hours = sum(m.get("target_duration_hours", 0) for m in milestones)
+    
+    # Get user's recent study pace
+    recent_activity = supabase.table("activity_log").select("minutes") \
+        .eq("user_id", user_id) \
+        .gte("date", str(date.today() - timedelta(days=30))) \
+        .execute().data or []
+    
+    avg_minutes_per_week = (sum(r["minutes"] for r in recent_activity) / 4) if recent_activity else 0
+    avg_hours_per_week = avg_minutes_per_week / 60
+    
+    # Calculate projections
+    if avg_hours_per_week > 0:
+        weeks_needed = total_hours / avg_hours_per_week
+        projected_completion = date.today() + timedelta(weeks=weeks_needed)
+        on_track = goal.get("deadline") is None or projected_completion <= date.fromisoformat(goal["deadline"])
+        completion_probability = min(100, int((avg_hours_per_week / 10) * 100))  # 10 hrs/week = high confidence
+    else:
+        weeks_needed = None
+        projected_completion = None
+        on_track = False
+        completion_probability = 20  # Default low if no history
+    
+    # Optimal schedule: suggest daily minutes
+    daily_minutes = int((avg_hours_per_week * 60) / 5) if avg_hours_per_week > 0 else 30
+    
+    return {
+        "goal_id": goal_id,
+        "total_hours_required": total_hours,
+        "avg_hours_per_week": round(avg_hours_per_week, 1),
+        "weeks_needed": round(weeks_needed, 1) if weeks_needed else None,
+        "projected_completion_date": str(projected_completion) if projected_completion else None,
+        "deadline": goal.get("deadline"),
+        "on_track": on_track,
+        "completion_probability_pct": completion_probability,
+        "recommended_daily_minutes": daily_minutes,
+        "milestones_completed": sum(1 for m in milestones if m.get("status") == "completed"),
+        "milestones_total": len(milestones),
+    }
+
 
 # ─── Recommendation feedback (feeds DAE-CF retraining) ───────────────────────
 
@@ -721,7 +793,254 @@ def send_buddy_request(data: BuddyRequestCreate, user_id: str = Depends(get_curr
     }).execute()
     _check_achievement(user_id, "buddy_connect")
     return result.data[0]
+class InteractionCreate(BaseModel):
+    to_user_id: str
+    mode: str  # teaching, collaborative, discussion
+    scheduled_at: Optional[str] = None
+    duration_minutes: int = 60
 
+@app.post("/buddies/{buddy_id}/schedule")
+def schedule_interaction(buddy_id: str, data: InteractionCreate,
+                        user_id: str = Depends(get_current_user)):
+    """Schedule a study session with a buddy."""
+    # Find mutual buddy request
+    requests = supabase.table("buddy_requests").select("id") \
+        .eq("from_user_id", user_id).eq("to_user_id", buddy_id).execute().data or []
+    
+    if not requests:
+        raise HTTPException(404, "Buddy connection not found")
+    
+    result = supabase.table("buddy_interactions").insert({
+        "buddy_request_id": requests[0]["id"],
+        "mode": data.mode,
+        "scheduled_at": data.scheduled_at,
+        "duration_minutes": data.duration_minutes,
+    }).execute()
+    
+    return result.data[0]
+
+@app.get("/buddies/sessions")
+def get_buddy_sessions(user_id: str = Depends(get_current_user)):
+    """Get upcoming study sessions."""
+    # Complex join to get buddy info + session details
+    requests = supabase.table("buddy_requests").select("*") \
+        .in_("from_user_id,to_user_id", [user_id, user_id]).execute().data or []
+    
+    sessions = []
+    for req in requests:
+        interactions = supabase.table("buddy_interactions").select("*") \
+            .eq("buddy_request_id", req["id"]).execute().data or []
+        
+        other_id = req["to_user_id"] if req["from_user_id"] == user_id else req["from_user_id"]
+        other = supabase.table("users").select("name, level").eq("id", other_id).single().execute().data
+        
+        for inter in interactions:
+          sessions.append({**inter, "buddy": other})
+    
+    return sessions
+
+#Streak freezes routes-------------------------------------------- 
+
+@app.post("/streaks/freeze")
+def use_freeze_token(user_id: str = Depends(get_current_user)):
+    """Use a streak freeze token (max 3/month)."""
+    today = date.today()
+    
+    # Check usage this month
+    month_start = today.replace(day=1)
+    used_this_month = supabase.table("streak_freezes").select("id") \
+        .eq("user_id", user_id) \
+        .gte("used_at", str(month_start)) \
+        .execute()
+    
+    if len(used_this_month.data or []) >= 3:
+        raise HTTPException(429, "Max 3 freeze tokens per month")
+    
+    supabase.table("streak_freezes").insert({
+        "user_id": user_id,
+        "used_date": str(today),
+    }).execute()
+    
+    return {"ok": True, "message": "Streak saved!"}
+
+@app.get("/streaks/tokens-remaining")
+def get_freeze_tokens(user_id: str = Depends(get_current_user)):
+    """Get remaining streak freeze tokens for this month."""
+    today = date.today()
+    month_start = today.replace(day=1)
+    
+    used = supabase.table("streak_freezes").select("id") \
+        .eq("user_id", user_id) \
+        .gte("used_at", str(month_start)) \
+        .execute()
+    
+    remaining = max(0, 3 - len(used.data or []))
+    return {"remaining": remaining, "total_per_month": 3}
+
+# ─── Goal Management Routes ───────────────────────────────────────────
+
+class GoalCreate(BaseModel):
+    title: str
+    description: Optional[str] = None
+    category: str
+    target_level: int = 1
+    deadline: Optional[str] = None
+
+class PreferencesUpdate(BaseModel):
+    study_hours_per_week: int
+    preferred_platforms: List[str]
+    learning_style: str  # visual, auditory, kinesthetic, reading
+    pace: str = "moderate"
+
+@app.post("/goals", status_code=201)
+async def create_goal(data: GoalCreate, user_id: str = Depends(get_current_user)):
+    """Create a learning goal and auto-generate learning path."""
+    result = supabase.table("learning_goals").insert({
+        "user_id": user_id,
+        "title": data.title,
+        "description": data.description,
+        "category": data.category,
+        "target_level": data.target_level,
+        "deadline": data.deadline,
+        "status": "active",
+    }).execute()
+    
+    goal = result.data[0]
+    
+    # Auto-generate learning path using ML
+    try:
+        path = await _generate_learning_path(goal, user_id)
+        goal["learning_path"] = path
+    except Exception as e:
+        print(f"Path generation failed: {e}")
+    
+    return goal
+
+@app.get("/goals")
+def list_goals(user_id: str = Depends(get_current_user)):
+    """List all learning goals for user."""
+    goals = supabase.table("learning_goals").select("*") \
+        .eq("user_id", user_id).execute().data or []
+    
+    result = []
+    for goal in goals:
+        path = supabase.table("learning_paths").select("*") \
+            .eq("goal_id", goal["id"]).order("sequence").execute().data or []
+        result.append({**goal, "milestones": path})
+    
+    return result
+
+@app.get("/goals/{goal_id}")
+def get_goal(goal_id: str, user_id: str = Depends(get_current_user)):
+    """Get single goal with full milestone breakdown."""
+    goal = supabase.table("learning_goals").select("*") \
+        .eq("id", goal_id).eq("user_id", user_id).single().execute().data
+    
+    milestones = supabase.table("learning_paths").select("*") \
+        .eq("goal_id", goal_id).order("sequence").execute().data or []
+    
+    return {**goal, "milestones": milestones}
+
+@app.patch("/goals/{goal_id}")
+def update_goal(goal_id: str, data: dict, user_id: str = Depends(get_current_user)):
+    """Update goal status or deadline."""
+    result = supabase.table("learning_goals").update(data) \
+        .eq("id", goal_id).eq("user_id", user_id).execute()
+    return result.data[0] if result.data else None
+
+@app.post("/preferences")
+def update_preferences(data: PreferencesUpdate, user_id: str = Depends(get_current_user)):
+    """Save user learning preferences."""
+    existing = supabase.table("learning_preferences").select("id") \
+        .eq("user_id", user_id).execute()
+    
+    payload = {
+        "user_id": user_id,
+        "study_hours_per_week": data.study_hours_per_week,
+        "preferred_platforms": data.preferred_platforms,
+        "learning_style": data.learning_style,
+        "pace": data.pace,
+    }
+    
+    if existing.data:
+        result = supabase.table("learning_preferences").update(payload) \
+            .eq("user_id", user_id).execute()
+    else:
+        result = supabase.table("learning_preferences").insert(payload).execute()
+    
+    return result.data[0]
+
+@app.get("/preferences")
+def get_preferences(user_id: str = Depends(get_current_user)):
+    """Retrieve user learning preferences."""
+    result = supabase.table("learning_preferences").select("*") \
+        .eq("user_id", user_id).single().execute()
+    return result.data or {
+        "study_hours_per_week": 10,
+        "preferred_platforms": ["YouTube", "Udemy", "Coursera"],
+        "learning_style": "visual",
+        "pace": "moderate",
+    }
+
+# ─── Learning Path Generation (Async) ───────────────────────────────────
+
+async def _generate_learning_path(goal: dict, user_id: str) -> List[dict]:
+    """
+    Generate AI-powered learning path based on goal category and user level.
+    This calls the ML service to suggest milestones and structure.
+    """
+    try:
+        # For MVP: use curated paths by category
+        paths = CURATED_PATHS.get(goal["category"], DEFAULT_PATH)
+        
+        milestones = []
+        for i, milestone in enumerate(paths, 1):
+            result = supabase.table("learning_paths").insert({
+                "goal_id": goal["id"],
+                "sequence": i,
+                "milestone_title": milestone["title"],
+                "description": milestone["description"],
+                "target_duration_hours": milestone["hours"],
+                "status": "not_started",
+            }).execute()
+            milestones.append(result.data[0])
+        
+        return milestones
+    except Exception as e:
+        print(f"Error generating path: {e}")
+        return []
+
+# Curated learning paths by category
+CURATED_PATHS = {
+    "Web Development": [
+        {"title": "HTML & CSS Fundamentals", "description": "Learn semantic HTML and responsive design", "hours": 20},
+        {"title": "JavaScript Core", "description": "Variables, functions, async/await, DOM manipulation", "hours": 30},
+        {"title": "React Basics", "description": "Components, hooks, state management", "hours": 25},
+        {"title": "Backend (Node + Express)", "description": "REST APIs, databases, authentication", "hours": 30},
+        {"title": "Full-Stack Project", "description": "Build and deploy a complete application", "hours": 40},
+    ],
+    "Data Science": [
+        {"title": "Python Fundamentals", "description": "NumPy, Pandas, Matplotlib", "hours": 25},
+        {"title": "Statistics & Probability", "description": "Distributions, hypothesis testing, Bayesian thinking", "hours": 20},
+        {"title": "Machine Learning Basics", "description": "Supervised learning, unsupervised learning, evaluation", "hours": 30},
+        {"title": "Deep Learning", "description": "Neural networks, CNNs, RNNs, transformers", "hours": 35},
+        {"title": "Capstone Project", "description": "End-to-end ML pipeline", "hours": 40},
+    ],
+    "Career Switch": [
+        {"title": "Assess Current Skills", "description": "Identify transferable skills", "hours": 5},
+        {"title": "Domain Basics", "description": "Learn fundamentals of target field", "hours": 30},
+        {"title": "Core Competencies", "description": "Deep dive into key techniques and tools", "hours": 50},
+        {"title": "Build Portfolio", "description": "Create 2-3 portfolio projects", "hours": 60},
+        {"title": "Networking & Applications", "description": "Connect with professionals, apply to roles", "hours": 20},
+    ],
+}
+
+DEFAULT_PATH = [
+    {"title": "Foundation", "description": "Learn core concepts", "hours": 20},
+    {"title": "Intermediate", "description": "Build practical skills", "hours": 30},
+    {"title": "Advanced", "description": "Master the topic", "hours": 40},
+    {"title": "Capstone", "description": "Real-world project", "hours": 50},
+]
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 

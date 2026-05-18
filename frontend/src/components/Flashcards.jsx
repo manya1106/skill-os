@@ -17,6 +17,8 @@ export default function Flashcards() {
   const [cardIndex, setCardIndex]   = useState(0);
   const [flipped, setFlipped]       = useState(false);
   const [done, setDone]             = useState(false);
+  const [showCreateDeck, setShowCreateDeck] = useState(false);
+  const [showAddCard, setShowAddCard] = useState(false);
 
   useEffect(() => {
     api.decks()
@@ -72,7 +74,14 @@ export default function Flashcards() {
         {!loading && decks.length === 0 && (
           <p className="text-center py-12 text-slate-400 text-sm">No decks yet. Create one to get started.</p>
         )}
-        <button className="mt-6 w-full py-3 border-2 border-dashed border-slate-200 rounded-2xl text-sm font-semibold text-slate-400 hover:border-indigo-300 hover:text-indigo-500 transition-all">
+        <CreateDeckModal isOpen={showCreateDeck} onClose={() => setShowCreateDeck(false)} 
+          onCreated={(newDeck) => {
+            setDecks(prev => [newDeck, ...prev]);
+            setShowCreateDeck(false);
+          }} />
+
+        <button onClick={() => setShowCreateDeck(true)}
+          className="mt-6 w-full py-3 border-2 border-dashed border-slate-200 rounded-2xl text-sm font-semibold text-slate-400 hover:border-indigo-300 hover:text-indigo-500 transition-all">
           + Create new deck
         </button>
       </div>
@@ -176,6 +185,12 @@ export default function Flashcards() {
               </button>
             ))}
           </div>
+
+          <button onClick={() => setShowAddCard(true)}
+            className="mt-3 w-full py-2 text-sm font-medium text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors">
+            + Add similar card
+          </button>
+
         </div>
       ) : (
         <button onClick={() => setFlipped(true)}
@@ -183,10 +198,148 @@ export default function Flashcards() {
           Reveal answer
         </button>
       )}
+
+      <AddCardModal isOpen={showAddCard} deckId={activeDeck} 
+        onClose={() => setShowAddCard(false)}
+        onCreated={(newCard) => {
+          setCards(prev => [...prev, newCard]);
+          setShowAddCard(false);
+        }} />
     </div>
   );
 }
 
+function CreateDeckModal({ isOpen, onClose, onCreated }) {
+  const [title, setTitle] = useState("");
+  const [color, setColor] = useState("indigo");
+  const [saving, setSaving] = useState(false);
+
+  async function handleCreate() {
+    setSaving(true);
+    try {
+      const deck = await api.createDeck({ title, color });
+      onCreated(deck);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+      <div className="bg-white rounded-3xl p-8 max-w-sm w-full mx-4">
+        <h2 className="text-xl font-bold text-slate-900 mb-6">Create new deck</h2>
+        
+        <div className="mb-6">
+          <label className="block text-xs font-semibold text-slate-600 mb-2">Deck name</label>
+          <input type="text" placeholder="e.g., Spanish vocab"
+            value={title} onChange={e => setTitle(e.target.value)}
+            className="w-full px-4 py-2.5 border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-indigo-400" />
+        </div>
+
+        <div className="mb-8">
+          <label className="block text-xs font-semibold text-slate-600 mb-3">Color theme</label>
+          <div className="flex gap-3">
+            {["indigo", "purple", "blue"].map(c => (
+              <button key={c}
+                onClick={() => setColor(c)}
+                className={`w-10 h-10 rounded-lg transition-all ${
+                  color === c ? "ring-2 ring-offset-2 ring-slate-300" : ""
+                } ${
+                  c === "indigo" ? "bg-indigo-500" :
+                  c === "purple" ? "bg-purple-500" :
+                  "bg-blue-500"
+                }`} />
+            ))}
+          </div>
+        </div>
+
+        <div className="flex gap-3">
+          <button onClick={onClose}
+            className="flex-1 px-4 py-2.5 border border-slate-200 rounded-xl text-sm font-semibold text-slate-700 hover:bg-slate-50 transition-colors">
+            Cancel
+          </button>
+          <button onClick={handleCreate} disabled={!title || saving}
+            className="flex-1 px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 transition-colors disabled:opacity-50">
+            {saving ? "Creating…" : "Create"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AddCardModal({ isOpen, deckId, onClose, onCreated }) {
+  const [question, setQuestion] = useState("");
+  const [answer, setAnswer] = useState("");
+  const [source, setSource] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function handleCreate() {
+    setSaving(true);
+    try {
+      const card = await api.createCard(deckId, {
+        question, answer,
+        source: source || null,
+      });
+      onCreated(card);
+      setQuestion("");
+      setAnswer("");
+      setSource("");
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+      <div className="bg-white rounded-3xl p-8 max-w-md w-full mx-4 max-h-[80vh] overflow-y-auto">
+        <h2 className="text-xl font-bold text-slate-900 mb-6">Add new card</h2>
+        
+        <div className="mb-5">
+          <label className="block text-xs font-semibold text-slate-600 mb-2">Question</label>
+          <textarea placeholder="What do you want to remember?"
+            value={question} onChange={e => setQuestion(e.target.value)}
+            className="w-full px-4 py-2.5 border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-indigo-400 resize-none"
+            rows={3} />
+        </div>
+
+        <div className="mb-5">
+          <label className="block text-xs font-semibold text-slate-600 mb-2">Answer</label>
+          <textarea placeholder="Your answer"
+            value={answer} onChange={e => setAnswer(e.target.value)}
+            className="w-full px-4 py-2.5 border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-indigo-400 resize-none"
+            rows={4} />
+        </div>
+
+        <div className="mb-8">
+          <label className="block text-xs font-semibold text-slate-600 mb-2">Source (optional)</label>
+          <input type="text" placeholder="e.g., Lesson 3: Chapter 5"
+            value={source} onChange={e => setSource(e.target.value)}
+            className="w-full px-4 py-2.5 border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-indigo-400" />
+        </div>
+
+        <div className="flex gap-3">
+          <button onClick={onClose}
+            className="flex-1 px-4 py-2.5 border border-slate-200 rounded-xl text-sm font-semibold text-slate-700 hover:bg-slate-50 transition-colors">
+            Cancel
+          </button>
+          <button onClick={handleCreate} disabled={!question || !answer || saving}
+            className="flex-1 px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 transition-colors disabled:opacity-50">
+            {saving ? "Adding…" : "Add card"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 function DeckCard({ deck, onStart }) {
   const pct = deck.card_count > 0
     ? Math.round((deck.mastered_count / deck.card_count) * 100)

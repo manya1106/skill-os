@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
+import html2canvas from "html2canvas";
+import jsPDF from "jspdf";
 import { api } from "../api";
 
 // ── Colour palette ────────────────────────────────────────────────────────────
@@ -315,8 +317,70 @@ export default function Analytics() {
 
   const hasAnyData = resources.length > 0 || totalMinutes > 0;
 
+  async function exportAnalytics(format = "pdf") {
+    try {
+      const chartElement = document.getElementById("analytics-container");
+      const canvas = await html2canvas(chartElement, {
+        scale: 2,
+        useCORS: true,
+        backgroundColor: "#ffffff",
+      });
+
+      if (format === "png") {
+        const link = document.createElement("a");
+        link.href = canvas.toDataURL();
+        link.download = `skillOS-analytics-${new Date().toISOString().split("T")[0]}.png`;
+        link.click();
+      } else if (format === "pdf") {
+        const pdf = new jsPDF({
+          orientation: "portrait",
+          unit: "mm",
+          format: "a4",
+        });
+
+        const imgData = canvas.toDataURL("image/png");
+        const imgWidth = 210; // A4 width
+        const imgHeight = (canvas.height * imgWidth) / canvas.width;
+
+        pdf.addImage(imgData, "PNG", 0, 0, imgWidth, imgHeight);
+        pdf.save(`skillOS-analytics-${new Date().toISOString().split("T")[0]}.pdf`);
+      }
+    } catch (err) {
+      console.error("Export failed:", err);
+    }
+  }
+
   return (
-    <div style={{ padding: "2rem", maxWidth: 880, margin: "0 auto" }}>
+    <div>
+      {/* Header with export buttons */}
+      <div style={{
+        display: "flex", justifyContent: "space-between", alignItems: "center",
+        padding: "2rem 2rem 0", maxWidth: 880, margin: "0 auto",
+      }}>
+        <h1 style={{ fontSize: 24, fontWeight: 500, margin: 0 }}>Analytics</h1>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={() => exportAnalytics("png")}
+            style={{
+              padding: "8px 14px", fontSize: 12, fontWeight: 500,
+              border: "0.5px solid var(--color-border-secondary)",
+              borderRadius: 8, background: "white", cursor: "pointer",
+            }}>
+            📥 PNG
+          </button>
+          <button onClick={() => exportAnalytics("pdf")}
+            style={{
+              padding: "8px 14px", fontSize: 12, fontWeight: 500,
+              border: "0.5px solid var(--color-border-secondary)",
+              borderRadius: 8, background: "white", cursor: "pointer",
+            }}>
+            📋 PDF
+          </button>
+        </div>
+      </div>
+
+      {/* Analytics content wrapped in exportable div */}
+      <div id="analytics-container">
+        <div style={{ padding: "2rem", maxWidth: 880, margin: "0 auto" }}>
 
       {!hasAnyData && (
         <div style={{
@@ -520,6 +584,8 @@ export default function Analytics() {
           </table>
         </div>
       )}
+    </div>
+      </div>
     </div>
   );
 }
