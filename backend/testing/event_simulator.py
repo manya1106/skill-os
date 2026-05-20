@@ -3,8 +3,8 @@ import random
 from datetime import datetime, timedelta
 from typing import List, Dict
 import json
-from learner_personas import get_persona
-from config import TestConfig
+from .learner_personas import get_persona
+from .config import TestConfig
 
 class EventSimulator:
     """Simulate realistic user behavior events"""

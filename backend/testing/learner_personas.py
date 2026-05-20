@@ -22,7 +22,7 @@ class LearnerPersona:
     
     def get_session_duration(self) -> int:
         """Get study duration in minutes"""
-        return random.randint(*self.study_hours_per_session) * 60
+        return random.uniform(*self.study_hours_per_session) * 60
     
     def should_rewatch(self) -> bool:
         return random.random() < self.rewatch_frequency

@@ -4,7 +4,15 @@
   "description": "",
   "main": "page-objects.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "playwright test",
+    "test:ui": "playwright test --ui",
+    "test:debug": "playwright test --debug",
+    "test:headed": "playwright test --headed",
+    "test:watch": "playwright test --watch",
+    "test:report": "playwright show-report"
+  },
+  "dependencies": {
+    "@faker-js/faker": "^8.0.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.40.0"

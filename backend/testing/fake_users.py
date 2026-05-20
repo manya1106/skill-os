@@ -2,7 +2,7 @@
 from faker import Faker
 from typing import List, Dict
 import random
-from config import TestConfig
+from .config import TestConfig
 
 fake = Faker()
 
