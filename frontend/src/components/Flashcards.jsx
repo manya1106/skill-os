@@ -2,12 +2,21 @@ import React, { useState, useEffect } from "react";
 import { RotateCcw, CheckCircle2, Layers, ChevronRight } from "lucide-react";
 import { api } from "../api";
 
-const RATINGS = [
-  { label: "Again", sub: "< 1 min",  cls: "border-red-300 text-red-600 hover:bg-red-50",       rating: 0 },
-  { label: "Hard",  sub: "~10 min",  cls: "border-amber-300 text-amber-600 hover:bg-amber-50",  rating: 1 },
-  { label: "Good",  sub: "~3 days",  cls: "border-indigo-300 text-indigo-600 hover:bg-indigo-50", rating: 2 },
-  { label: "Easy",  sub: "~1 week",  cls: "border-green-300 text-green-600 hover:bg-green-50",  rating: 3 },
+const RATING_META = [
+  { label: "Again", key: "again", cls: "border-red-300 text-red-600 hover:bg-red-50",       rating: 0 },
+  { label: "Hard",  key: "hard",  cls: "border-amber-300 text-amber-600 hover:bg-amber-50",  rating: 1 },
+  { label: "Good",  key: "good",  cls: "border-indigo-300 text-indigo-600 hover:bg-indigo-50", rating: 2 },
+  { label: "Easy",  key: "easy",  cls: "border-green-300 text-green-600 hover:bg-green-50",  rating: 3 },
 ];
+
+function formatInterval(days) {
+  if (days == null) return "—";
+  if (days < 1) return "< 1 day";
+  if (days === 1) return "1 day";
+  if (days < 7) return `${days} days`;
+  if (days < 30) return `${Math.round(days / 7)} wk`;
+  return `${Math.round(days / 30)} mo`;
+}
 
 export default function Flashcards() {
   const [decks, setDecks]           = useState([]);
@@ -19,13 +28,25 @@ export default function Flashcards() {
   const [done, setDone]             = useState(false);
   const [showCreateDeck, setShowCreateDeck] = useState(false);
   const [showAddCard, setShowAddCard] = useState(false);
+  const [intervals, setIntervals] = useState(null);
 
   useEffect(() => {
     api.decks()
       .then(setDecks)
       .catch(console.error)
       .finally(() => setLoading(false));
+    api.remindersDue().catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (!flipped || !cards[cardIndex]) {
+      setIntervals(null);
+      return;
+    }
+    api.cardIntervalPreview(cards[cardIndex].id)
+      .then(setIntervals)
+      .catch(() => setIntervals(null));
+  }, [flipped, cardIndex, cards]);
 
   async function startDeck(deckId) {
     try {
@@ -177,11 +198,13 @@ export default function Flashcards() {
         <div className="mt-6">
           <p className="text-xs text-center text-slate-400 mb-3">How well did you remember?</p>
           <div className="grid grid-cols-4 gap-2">
-            {RATINGS.map(r => (
+            {RATING_META.map(r => (
               <button key={r.label} onClick={() => rate(r.rating)}
                 className={`flex flex-col items-center py-3 rounded-xl border-2 font-semibold text-xs transition-all active:scale-95 ${r.cls}`}>
                 <span>{r.label}</span>
-                <span className="text-[10px] opacity-60 mt-0.5">{r.sub}</span>
+                <span className="text-[10px] opacity-60 mt-0.5">
+                  {intervals ? formatInterval(intervals[r.key]) : "FSRS"}
+                </span>
               </button>
             ))}
           </div>

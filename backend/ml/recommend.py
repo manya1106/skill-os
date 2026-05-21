@@ -160,6 +160,52 @@ def get_tfidf_recommendations(
     return results if results else _fallback_recommendations()
 
 
+def get_tfidf_score_map(user_id: str, supabase) -> dict[str, float]:
+    """
+    Return normalised TF-IDF similarity scores for all catalogue resources.
+
+    Used by hybrid DAE-CF blending: {resource_id: score in [0, 1]}.
+    """
+    all_resp = supabase.table("resources").select(
+        "id, user_id, platform, title, tags"
+    ).execute()
+    all_resources = all_resp.data or []
+    if not all_resources:
+        return {}
+
+    user_resources = [r for r in all_resources if r["user_id"] == user_id]
+    candidates = [r for r in all_resources if r["user_id"] != user_id]
+    if not candidates:
+        return {}
+
+    all_docs_resources = user_resources + candidates
+    all_tokens = [_resource_to_tokens(r) for r in all_docs_resources]
+    tfidf_vectors, idf = _build_tfidf(all_tokens)
+
+    n_user = len(user_resources)
+    user_vectors = tfidf_vectors[:n_user]
+    candidate_vectors = tfidf_vectors[n_user:]
+
+    if user_vectors:
+        all_terms = set(t for vec in user_vectors for t in vec)
+        profile = {
+            term: sum(v.get(term, 0) for v in user_vectors) / len(user_vectors)
+            for term in all_terms
+        }
+    else:
+        profile = {
+            term: score
+            for term, score in sorted(idf.items(), key=lambda x: x[1], reverse=True)[:50]
+        }
+
+    scores: dict[str, float] = {}
+    for resource, vec in zip(candidates, candidate_vectors):
+        sim = _cosine_similarity(profile, vec)
+        scores[resource["id"]] = max(0.0, min(1.0, sim))
+
+    return scores
+
+
 def _explain_recommendation(resource: dict, profile: dict, idf: dict) -> str:
     """Generate a plain-English reason string."""
     tokens = _resource_to_tokens(resource)

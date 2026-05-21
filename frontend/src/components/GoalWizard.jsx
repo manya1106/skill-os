@@ -37,6 +37,7 @@ export default function GoalWizard({ onComplete }) {
     preferred_platforms: ["YouTube", "Udemy", "Coursera"],
     learning_style: "visual",
     pace: "moderate",
+    preferred_interaction_mode: "collaborative",
   });
   const [loading, setLoading] = useState(false);
 
@@ -44,10 +45,14 @@ export default function GoalWizard({ onComplete }) {
     setLoading(true);
     try {
       // Create goal
-      const goalRes = await api.post("/goals", goal);
-      
-      // Save preferences
-      await api.post("/preferences", prefs);
+      const goalRes = await api.createGoal({
+        ...goal,
+        description: goal.description || `Learn ${goal.title}`,
+      });
+      await api.updatePreferences({
+        ...prefs,
+        preferred_interaction_mode: prefs.preferred_interaction_mode || "collaborative",
+      });
       
       onComplete(goalRes);
     } catch (err) {
@@ -188,13 +193,19 @@ function Step2_GoalDetails({ goal, setGoal }) {
   );
 }
 
+const INTERACTION_MODES = [
+  { id: "teaching", label: "Mutual teaching", desc: "Take turns explaining concepts" },
+  { id: "collaborative", label: "Collaborative", desc: "Solve problems together" },
+  { id: "discussion", label: "Discussion", desc: "Debate ideas and quiz each other" },
+];
+
 function Step3_LearningStyle({ prefs, setPrefs }) {
   return (
     <div>
       <h2 style={{ fontSize: 16, fontWeight: 500, marginBottom: 16 }}>
         How do you learn best?
       </h2>
-      <div style={{ display: "grid", gap: 10 }}>
+      <div style={{ display: "grid", gap: 10, marginBottom: 20 }}>
         {LEARNING_STYLES.map(style => (
           <button key={style.id} onClick={() => setPrefs({...prefs, learning_style: style.id})}
             style={{
@@ -207,6 +218,22 @@ function Step3_LearningStyle({ prefs, setPrefs }) {
             <p style={{ margin: 0, fontSize: 11, color: "var(--color-text-secondary)" }}>
               {style.desc}
             </p>
+          </button>
+        ))}
+      </div>
+      <h2 style={{ fontSize: 14, fontWeight: 500, marginBottom: 10 }}>
+        Preferred buddy interaction mode
+      </h2>
+      <div style={{ display: "grid", gap: 8 }}>
+        {INTERACTION_MODES.map(m => (
+          <button key={m.id} onClick={() => setPrefs({ ...prefs, preferred_interaction_mode: m.id })}
+            style={{
+              padding: 10, borderRadius: 10, textAlign: "left",
+              border: `2px solid ${prefs.preferred_interaction_mode === m.id ? "#4F46E5" : "var(--color-border-secondary)"}`,
+              background: prefs.preferred_interaction_mode === m.id ? "#EEF2FF" : "white",
+              cursor: "pointer", fontSize: 12,
+            }}>
+            <strong>{m.label}</strong> — {m.desc}
           </button>
         ))}
       </div>

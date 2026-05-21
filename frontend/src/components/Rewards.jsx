@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Trophy, Star, Flame, Zap, Lock } from "lucide-react";
+import { Trophy, Star, Flame, Zap, Lock, Snowflake } from "lucide-react";
 import { api } from "../api";
 
 function XPBar({ xp, xpToNext, level }) {
@@ -158,13 +158,31 @@ function AchievementCard({ ach }) {
 export default function Rewards({ user }) {
   const [achievements, setAchievements] = useState([]);
   const [loading, setLoading]           = useState(true);
+  const [freezeTokens, setFreezeTokens] = useState(null);
+  const [freezeLoading, setFreezeLoading] = useState(false);
+  const [freezeMessage, setFreezeMessage] = useState(null);
 
   useEffect(() => {
     api.achievements()
       .then(setAchievements)
       .catch(console.error)
       .finally(() => setLoading(false));
+    api.freezeTokens().then(setFreezeTokens).catch(() => setFreezeTokens(null));
   }, []);
+
+  async function handleUseFreeze() {
+    setFreezeLoading(true);
+    setFreezeMessage(null);
+    try {
+      const res = await api.useFreezeToken();
+      setFreezeMessage(res.message || "Streak protected!");
+      setFreezeTokens(await api.freezeTokens());
+    } catch (err) {
+      setFreezeMessage(err.message || "Could not use freeze token");
+    } finally {
+      setFreezeLoading(false);
+    }
+  }
 
   const unlocked = achievements.filter(a => a.unlocked);
   const locked   = achievements.filter(a => !a.unlocked);
@@ -176,14 +194,13 @@ export default function Rewards({ user }) {
 
   // XP earning guide — what earns what
   const XP_GUIDE = [
-    { action: "Daily login",              xp: 15 },
-    { action: "Add a resource",           xp: 10 },
-    { action: "Start a resource",         xp:  5 },
-    { action: "Complete a resource",      xp: 50 },
-    { action: "Flashcard review (Good)",  xp:  5 },
-    { action: "Flashcard review (Easy)",  xp:  8 },
-    { action: "7-day streak",             xp: 100 },
-    { action: "30-day streak",            xp: 500 },
+    { action: "Daily login",                xp: 10 },
+    { action: "Lesson / video complete",    xp: 25 },
+    { action: "Full course complete",       xp: 200 },
+    { action: "Flashcard success (Good/Easy)", xp: 15 },
+    { action: "Connect study buddy",        xp: 50 },
+    { action: "7-day streak bonus",         xp: 100 },
+    { action: "30-day streak bonus",        xp: 500 },
   ];
 
   return (
@@ -191,6 +208,47 @@ export default function Rewards({ user }) {
 
       {/* XP / Level banner */}
       <XPBar xp={xp} xpToNext={xpToNext} level={level} />
+
+      {/* Streak freeze tokens */}
+      {freezeTokens && (
+        <div style={{
+          background: "white", border: "1px solid #E2E8F0", borderRadius: 16,
+          padding: "16px 20px", marginBottom: 20,
+          display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <div style={{
+              width: 40, height: 40, borderRadius: 12, background: "#E0F2FE",
+              display: "flex", alignItems: "center", justifyContent: "center",
+            }}>
+              <Snowflake style={{ width: 20, height: 20, color: "#0284C7" }} />
+            </div>
+            <div>
+              <p style={{ margin: 0, fontSize: 14, fontWeight: 600, color: "#0F172A" }}>
+                Streak freeze — {freezeTokens.remaining}/{freezeTokens.total_per_month} left
+              </p>
+              <p style={{ margin: "2px 0 0", fontSize: 12, color: "#64748B" }}>
+                Protect your streak after missing one day (resets monthly)
+              </p>
+              {freezeMessage && (
+                <p style={{ margin: "6px 0 0", fontSize: 12, color: "#0284C7" }}>{freezeMessage}</p>
+              )}
+            </div>
+          </div>
+          <button
+            onClick={handleUseFreeze}
+            disabled={freezeLoading || freezeTokens.remaining <= 0}
+            style={{
+              padding: "8px 14px", borderRadius: 10, border: "none",
+              background: freezeTokens.remaining > 0 ? "#0284C7" : "#E2E8F0",
+              color: freezeTokens.remaining > 0 ? "white" : "#94A3B8",
+              fontSize: 12, fontWeight: 600, cursor: freezeTokens.remaining > 0 ? "pointer" : "not-allowed",
+            }}
+          >
+            {freezeLoading ? "…" : "Use freeze"}
+          </button>
+        </div>
+      )}
 
       {/* Streak callout */}
       {streak > 0 && (

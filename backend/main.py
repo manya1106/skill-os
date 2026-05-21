@@ -42,31 +42,12 @@ JWT_SECRET = os.getenv("JWT_SECRET")
 JWT_ALGO = "HS256"
 ML_SERVICE_URL = os.getenv("ML_SERVICE_URL", "http://localhost:8001")
 
-# ─── XP table: how many XP each action awards ────────────────────────────────
-XP_AWARDS = {
-    "resource_added":        15,   # Up from 10
-    "resource_completed":   200,   # Up from 50 (major milestone)
-    "resource_in_progress":   5,   # Keep same
-    "flashcard_review":       3,   # Keep same
-    "flashcard_good":         5,   # Keep same
-    "flashcard_easy":        10,   # Up from 8
-    "daily_login":           10,   # Down from 15
-    "streak_3":              30,   # New: 3-day streak
-    "streak_7":             100,   # Keep same
-    "streak_30":            500,   # Keep same
-}
+from gamification import XP_AWARDS, award_xp, compute_level, xp_for_level
+from streak_freezes import activate_freeze, get_token_inventory, update_streak as _core_update_streak
 
-# XP needed to reach each level (cumulative)
-def xp_for_level(level: int) -> int:
-    """XP needed to reach `level` from 0. Quadratic curve."""
-    return int(500 * (level ** 1.8))
 
-def compute_level(total_xp: int) -> tuple[int, int]:
-    """Return (current_level, xp_to_next_level)."""
-    level = 1
-    while xp_for_level(level + 1) <= total_xp:
-        level += 1
-    return level, xp_for_level(level + 1) - total_xp
+def _award_xp(user_id: str, action: str) -> dict:
+    return award_xp(supabase, user_id, action)
 
 def _compute_xp_bonus(user_id: str, base_xp: int, action: str) -> int:
     """
@@ -99,7 +80,7 @@ ACHIEVEMENTS = [
     {"id": "ten_flashcards",   "title": "Card shark",        "desc": "Review 10 flashcards in a session","xp": 30,  "icon": "🃏"},
     {"id": "level_5",          "title": "Rising star",       "desc": "Reach level 5",                    "xp": 0,   "icon": "⭐"},
     {"id": "level_10",         "title": "Knowledge seeker",  "desc": "Reach level 10",                   "xp": 0,   "icon": "🎓"},
-    {"id": "buddy_connect",    "title": "Social learner",    "desc": "Connect with a study buddy",       "xp": 20,  "icon": "🤝"},
+    {"id": "buddy_connect",    "title": "Social learner",    "desc": "Connect with a study buddy",       "xp": 0,   "icon": "🤝"},
     {"id": "five_platforms",   "title": "Platform hopper",   "desc": "Learn from 5 different platforms", "xp": 60,  "icon": "🌐"},
     {"id": "multi_complete",   "title": "Completionist",     "desc": "Complete 5 resources",             "xp": 150, "icon": "🏅"},
 ]
@@ -124,55 +105,14 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
 
 # ─── Internal helpers ─────────────────────────────────────────────────────────
 
-def _award_xp(user_id: str, action: str) -> dict:
-    """Award XP for an action, update level, check achievements. Returns updated user."""
-    xp_gain = XP_AWARDS.get(action, 0)
-    if xp_gain == 0:
-        return {}
-
-    user_row = supabase.table("users").select("xp, level, streak").eq("id", user_id).single().execute().data
-    new_xp = (user_row.get("xp") or 0) + xp_gain
-    new_level, xp_to_next = compute_level(new_xp)
-
-    supabase.table("users").update({
-        "xp": new_xp,
-        "level": new_level,
-        "xp_to_next": xp_to_next,
-    }).eq("id", user_id).execute()
-
-    return {"xp_gained": xp_gain, "new_xp": new_xp, "new_level": new_level}
-
-
 def _update_streak(user_id: str) -> int:
-    """Update last_active and compute streak. Returns streak count."""
-    today = date.today()
-    user_row = supabase.table("users").select("last_active, streak").eq("id", user_id).single().execute().data
-    last_active = user_row.get("last_active")
-    current_streak = user_row.get("streak") or 0
+    """Update streak with freeze protection and milestone XP."""
 
-    if last_active:
-        last_date = date.fromisoformat(str(last_active)[:10])
-        delta = (today - last_date).days
-        if delta == 0:
-            return current_streak   # already counted today
-        elif delta == 1:
-            current_streak += 1     # consecutive day
-        else:
-            current_streak = 1      # streak broken, restart
-    else:
-        current_streak = 1
+    def on_milestone(uid: str, streak: int):
+        _award_xp(uid, f"streak_{streak}")
+        _check_achievement(uid, f"streak_{streak}")
 
-    supabase.table("users").update({
-        "last_active": str(today),
-        "streak": current_streak,
-    }).eq("id", user_id).execute()
-
-    # bonus XP for streak milestones
-    if current_streak in (3, 7, 30):
-        _award_xp(user_id, f"streak_{current_streak}")
-        _check_achievement(user_id, f"streak_{current_streak}")
-
-    return current_streak
+    return _core_update_streak(supabase, user_id, on_milestone)
 
 
 def _check_achievement(user_id: str, achievement_id: str):
@@ -253,9 +193,6 @@ class CardCreate(BaseModel):
 
 class CardReview(BaseModel):
     rating: int  # 0=Again 1=Hard 2=Good 3=Easy
-
-class BuddyRequestCreate(BaseModel):
-    to_user_id: str
 
 class RecommendationFeedback(BaseModel):
     resource_id: str
@@ -370,6 +307,12 @@ def update_resource(resource_id: str, data: ResourceUpdate,
         if new_status == "completed":
             xp_info = _award_xp(user_id, "resource_completed")
             _check_resource_achievements(user_id)
+            try:
+                from flashcard_generator import auto_generate_for_completed_resource
+                gen = auto_generate_for_completed_resource(supabase, user_id, updated)
+                updated["_flashcards_generated"] = gen
+            except Exception as e:
+                print(f"[Flashcards] Auto-generate failed: {e}")
         elif new_status == "in-progress" and old_status == "not-started":
             xp_info = _award_xp(user_id, "resource_in_progress")
 
@@ -384,6 +327,27 @@ def update_resource(resource_id: str, data: ResourceUpdate,
 def delete_resource(resource_id: str, user_id: str = Depends(get_current_user)):
     supabase.table("resources").delete() \
         .eq("id", resource_id).eq("user_id", user_id).execute()
+
+
+# ─── Flashcard helpers ────────────────────────────────────────────────────────
+
+def _assert_deck_owner(deck_id: str, user_id: str):
+    deck = supabase.table("flashcard_decks").select("id") \
+        .eq("id", deck_id).eq("user_id", user_id).execute()
+    if not deck.data:
+        raise HTTPException(404, "Deck not found")
+
+
+def _get_user_card(card_id: str, user_id: str) -> dict:
+    card = supabase.table("flashcards").select("*") \
+        .eq("id", card_id).single().execute().data
+    if not card:
+        raise HTTPException(404, "Card not found")
+    deck = supabase.table("flashcard_decks").select("user_id") \
+        .eq("id", card["deck_id"]).single().execute().data
+    if not deck or deck.get("user_id") != user_id:
+        raise HTTPException(404, "Card not found")
+    return card
 
 
 # ─── Flashcard deck routes ────────────────────────────────────────────────────
@@ -410,53 +374,144 @@ def create_deck(data: DeckCreate, user_id: str = Depends(get_current_user)):
 @app.get("/decks/{deck_id}/cards")
 def list_cards(deck_id: str, due_only: bool = False,
                user_id: str = Depends(get_current_user)):
+    from db_compat import card_to_api
     query = supabase.table("flashcards").select("*").eq("deck_id", deck_id)
     if due_only:
         query = query.lte("due_date", str(date.today()))
-    return query.execute().data
+    rows = query.execute().data or []
+    return [card_to_api(r) for r in rows]
 
 @app.post("/decks/{deck_id}/cards", status_code=201)
 def create_card(deck_id: str, data: CardCreate,
                 user_id: str = Depends(get_current_user)):
-    result = supabase.table("flashcards").insert({
-        **data.dict(), "deck_id": deck_id,
-        "due_date": str(date.today()),
-        "stability": 1.0, "difficulty": 0.5, "review_count": 0,
-    }).execute()
-    return result.data[0]
+    _assert_deck_owner(deck_id, user_id)
+    from fsrs import new_card_state
+    state = new_card_state()
+    from db_compat import card_insert_payload, card_to_api
+    payload = card_insert_payload(
+        user_id,
+        data.question,
+        data.answer,
+        deck_id=deck_id,
+        source=data.source,
+        due_date=str(state.due_date),
+        stability=state.stability,
+        difficulty=state.difficulty,
+    )
+    result = supabase.table("flashcards").insert(payload).execute()
+    return card_to_api(result.data[0])
+
+
+@app.get("/cards/{card_id}/interval-preview")
+def card_interval_preview(card_id: str, user_id: str = Depends(get_current_user)):
+    """FSRS interval preview (days) for each rating button."""
+    card = _get_user_card(card_id, user_id)
+    from fsrs import preview_intervals
+    return preview_intervals(
+        card.get("stability") or 0,
+        card.get("difficulty") or 5,
+        card.get("review_count") or 0,
+        card.get("last_review"),
+    )
+
 
 @app.post("/cards/{card_id}/review")
 def review_card(card_id: str, data: CardReview,
                 user_id: str = Depends(get_current_user)):
-    card = supabase.table("flashcards").select("*") \
-        .eq("id", card_id).single().execute().data
+    if data.rating not in (0, 1, 2, 3):
+        raise HTTPException(400, "Rating must be 0–3 (Again/Hard/Good/Easy)")
 
-    intervals = {0: 1, 1: 3, 2: 7, 3: 14}
-    new_stability  = card["stability"] * (1 + 0.1 * data.rating)
-    new_difficulty = max(0.1, card["difficulty"] - 0.05 * (data.rating - 2))
-    next_due = date.today() + timedelta(days=intervals.get(data.rating, 7))
-    new_review_count = card["review_count"] + 1
+    card = _get_user_card(card_id, user_id)
+    from fsrs import review as fsrs_review, retrievability
+
+    state = fsrs_review(
+        stability=float(card.get("stability") or 0),
+        difficulty=float(card.get("difficulty") or 5),
+        review_count=int(card.get("review_count") or 0),
+        last_review=card.get("last_review"),
+        rating=data.rating,
+    )
 
     result = supabase.table("flashcards").update({
-        "stability":    new_stability,
-        "difficulty":   new_difficulty,
-        "due_date":     str(next_due),
-        "last_review":  str(date.today()),
-        "review_count": new_review_count,
+        "stability": state.stability,
+        "difficulty": state.difficulty,
+        "due_date": str(state.due_date),
+        "last_review": str(date.today()),
+        "review_count": state.review_count,
     }).eq("id", card_id).execute()
 
-    # Award XP based on rating
-    action_map = {0: "flashcard_review", 1: "flashcard_review",
-                  2: "flashcard_good",   3: "flashcard_easy"}
+    action_map = {
+        0: "flashcard_review",
+        1: "flashcard_hard",
+        2: "flashcard_good",
+        3: "flashcard_easy",
+    }
     xp_info = _award_xp(user_id, action_map[data.rating])
 
-    # Check card-review achievement
-    if new_review_count >= 10:
+    if state.review_count >= 10:
         _check_achievement(user_id, "ten_flashcards")
 
     updated = result.data[0]
     updated["_xp"] = xp_info
+    updated["_fsrs"] = {
+        "interval_days": state.interval_days,
+        "retrievability": state.retrievability,
+        "retention_pct": round(
+            retrievability(0, state.stability) * 100, 1
+        ),
+        "stability": state.stability,
+        "difficulty": state.difficulty,
+    }
     return updated
+
+
+# ─── Review reminders ─────────────────────────────────────────────────────────
+
+class ReminderSettingsUpdate(BaseModel):
+    email_reminders_enabled: Optional[bool] = True
+    push_reminders_enabled: Optional[bool] = True
+
+
+@app.get("/reminders/due")
+def reminders_due(user_id: str = Depends(get_current_user)):
+    """Due-card summary for UI badges and push notification polling."""
+    from reminder_worker import get_due_summary
+    return get_due_summary(supabase, user_id)
+
+
+@app.get("/reminders/settings")
+def get_reminder_settings(user_id: str = Depends(get_current_user)):
+    try:
+        row = supabase.table("notification_settings").select("*") \
+            .eq("user_id", user_id).execute()
+        if row.data:
+            return row.data[0]
+    except Exception:
+        pass
+    return {
+        "user_id": user_id,
+        "email_reminders_enabled": True,
+        "push_reminders_enabled": True,
+    }
+
+
+@app.patch("/reminders/settings")
+def update_reminder_settings(
+    data: ReminderSettingsUpdate,
+    user_id: str = Depends(get_current_user),
+):
+    payload = {"user_id": user_id, **data.dict(exclude_unset=True)}
+    try:
+        existing = supabase.table("notification_settings").select("id") \
+            .eq("user_id", user_id).execute()
+        if existing.data:
+            result = supabase.table("notification_settings").update(payload) \
+                .eq("user_id", user_id).execute()
+        else:
+            result = supabase.table("notification_settings").insert(payload).execute()
+        return result.data[0]
+    except Exception:
+        return payload
 
 
 # ─── Activity routes ──────────────────────────────────────────────────────────
@@ -485,6 +540,28 @@ def log_activity(minutes: int, user_id: str = Depends(get_current_user)):
     # Update streak on any activity log
     streak = _update_streak(user_id)
     return {"date": today, "minutes": minutes, "streak": streak}
+
+
+# ─── Extension bulk sync (browser extension) ───────────────────────────────────
+
+from sync_events import SyncEventsRequest, process_bulk_sync
+
+
+@app.post("/api/v1/sync/events")
+def sync_events_bulk(body: SyncEventsRequest, user_id: str = Depends(get_current_user)):
+    """
+    Bulk ingest learning events from the browser extension.
+
+    - JWT auth (Bearer token)
+    - Optional email_hash (SHA-256 of normalised email) for PII-safe verification
+    - Batched events + optional activity_minutes in one request
+    """
+    if not body.events:
+        return {"synced": 0, "reason": "empty", "interactions_created": 0}
+
+    result = process_bulk_sync(supabase, user_id, body)
+    _update_streak(user_id)
+    return result
 
 
 # ─── Analytics routes (real data, no mocks) ───────────────────────────────────
@@ -568,7 +645,8 @@ def get_forgetting_curve(user_id: str = Depends(get_current_user)):
     if not cards:
         return {"data": [], "avg_retention": 0}
 
-    # Ebbinghaus formula: R = e^(-t / S)  where S = stability, t = days since review
+    from fsrs import retrievability as fsrs_retention
+
     today = date.today()
     data_points = []
     for c in cards:
@@ -577,7 +655,7 @@ def get_forgetting_curve(user_id: str = Depends(get_current_user)):
         last = date.fromisoformat(str(c["last_review"])[:10])
         days_since = (today - last).days
         stability = c.get("stability") or 1.0
-        retention = round(math.exp(-days_since / max(stability, 0.1)) * 100, 1)
+        retention = round(fsrs_retention(days_since, stability) * 100, 1)
         data_points.append({
             "days_since_review": days_since,
             "retention_pct": retention,
@@ -725,157 +803,84 @@ async def ml_health():
         return {"status": "ml_service_offline", "mode": "static_fallback"}
 
 
-# ─── Study buddies — real matching algorithm ──────────────────────────────────
+# ─── Study buddies ─────────────────────────────────────────────────────────────
+
+class BuddyRequestCreate(BaseModel):
+    to_user_id: str
+
+
+class SessionCreate(BaseModel):
+    mode: str = "collaborative"
+    scheduled_at: str
+    duration_minutes: int = 60
+    notes: Optional[str] = None
+
 
 @app.get("/buddies/matches")
 def find_buddies(user_id: str = Depends(get_current_user)):
-    """
-    Real matching: score all other users by:
-      1. Tag overlap (Jaccard similarity between their resource tags)
-      2. Level proximity (closer level = higher score)
-    Returns top 10 sorted by match_score desc.
-    """
-    # Get current user's tags
-    my_resources = supabase.table("resources").select("tags,platform") \
-        .eq("user_id", user_id).execute().data or []
-    my_tags = set()
-    for r in my_resources:
-        for t in (r.get("tags") or []):
-            my_tags.add(t.lower())
+    """Match on tags, level, goals, pace, and interaction mode."""
+    from buddy_matching import find_buddy_matches
+    return find_buddy_matches(supabase, user_id)
 
-    my_user = supabase.table("users").select("id,level").eq("id", user_id).single().execute().data
-    my_level = my_user.get("level") or 1
-
-    # Get requests already sent
-    sent = supabase.table("buddy_requests").select("to_user_id") \
-        .eq("from_user_id", user_id).execute().data or []
-    exclude_ids = {r["to_user_id"] for r in sent} | {user_id}
-
-    # Get all other users
-    others = supabase.table("users").select("id,name,level,xp").execute().data or []
-    others = [u for u in others if u["id"] not in exclude_ids]
-
-    scored = []
-    for u in others:
-        uid = u["id"]
-        # Their tags
-        their_resources = supabase.table("resources").select("tags") \
-            .eq("user_id", uid).execute().data or []
-        their_tags = set()
-        for r in their_resources:
-            for t in (r.get("tags") or []):
-                their_tags.add(t.lower())
-
-        # Jaccard similarity
-        if my_tags or their_tags:
-            intersection = len(my_tags & their_tags)
-            union = len(my_tags | their_tags)
-            tag_score = intersection / union if union > 0 else 0
-        else:
-            tag_score = 0.5  # neutral if no tags yet
-
-        # Level proximity score (1.0 = same level, 0.0 = >10 levels apart)
-        level_diff = abs((u.get("level") or 1) - my_level)
-        level_score = max(0, 1 - level_diff / 10)
-
-        # Weighted composite
-        match_score = round((tag_score * 0.7 + level_score * 0.3) * 100, 1)
-
-        scored.append({**u, "match_score": match_score})
-
-    scored.sort(key=lambda x: x["match_score"], reverse=True)
-    return scored[:10]
 
 @app.post("/buddies/request", status_code=201)
 def send_buddy_request(data: BuddyRequestCreate, user_id: str = Depends(get_current_user)):
     result = supabase.table("buddy_requests").insert({
-        "from_user_id": user_id, "to_user_id": data.to_user_id
+        "from_user_id": user_id,
+        "to_user_id": data.to_user_id,
+        "status": "pending",
     }).execute()
+    xp_info = _award_xp(user_id, "buddy_connect")
     _check_achievement(user_id, "buddy_connect")
-    return result.data[0]
-class InteractionCreate(BaseModel):
-    to_user_id: str
-    mode: str  # teaching, collaborative, discussion
-    scheduled_at: Optional[str] = None
-    duration_minutes: int = 60
+    created = result.data[0]
+    created["_xp"] = xp_info
+    return created
+
 
 @app.post("/buddies/{buddy_id}/schedule")
-def schedule_interaction(buddy_id: str, data: InteractionCreate,
-                        user_id: str = Depends(get_current_user)):
+def schedule_interaction(
+    buddy_id: str,
+    data: SessionCreate,
+    user_id: str = Depends(get_current_user),
+):
     """Schedule a study session with a buddy."""
-    # Find mutual buddy request
-    requests = supabase.table("buddy_requests").select("id") \
-        .eq("from_user_id", user_id).eq("to_user_id", buddy_id).execute().data or []
-    
-    if not requests:
-        raise HTTPException(404, "Buddy connection not found")
-    
-    result = supabase.table("buddy_interactions").insert({
-        "buddy_request_id": requests[0]["id"],
-        "mode": data.mode,
-        "scheduled_at": data.scheduled_at,
-        "duration_minutes": data.duration_minutes,
-    }).execute()
-    
-    return result.data[0]
+    from buddy_sessions import create_session
+    return create_session(
+        supabase,
+        user_id,
+        buddy_id,
+        data.mode,
+        data.scheduled_at,
+        data.duration_minutes,
+        data.notes,
+    )
+
 
 @app.get("/buddies/sessions")
 def get_buddy_sessions(user_id: str = Depends(get_current_user)):
-    """Get upcoming study sessions."""
-    # Complex join to get buddy info + session details
-    requests = supabase.table("buddy_requests").select("*") \
-        .in_("from_user_id,to_user_id", [user_id, user_id]).execute().data or []
-    
-    sessions = []
-    for req in requests:
-        interactions = supabase.table("buddy_interactions").select("*") \
-            .eq("buddy_request_id", req["id"]).execute().data or []
-        
-        other_id = req["to_user_id"] if req["from_user_id"] == user_id else req["from_user_id"]
-        other = supabase.table("users").select("name, level").eq("id", other_id).single().execute().data
-        
-        for inter in interactions:
-          sessions.append({**inter, "buddy": other})
-    
-    return sessions
+    """List all buddy sessions (fixed query — no invalid .in_())."""
+    from buddy_sessions import list_sessions
+    return list_sessions(supabase, user_id)
 
-#Streak freezes routes-------------------------------------------- 
+
+@app.get("/buddies/{buddy_id}/slots")
+def get_buddy_slots(buddy_id: str, user_id: str = Depends(get_current_user)):
+    """Calendar time-slot suggestions for scheduling."""
+    from buddy_sessions import upcoming_slots
+    return upcoming_slots(supabase, user_id, buddy_id)
+
+# ─── Streak freeze routes ───────────────────────────────────────────────────────
 
 @app.post("/streaks/freeze")
 def use_freeze_token(user_id: str = Depends(get_current_user)):
-    """Use a streak freeze token (max 3/month)."""
-    today = date.today()
-    
-    # Check usage this month
-    month_start = today.replace(day=1)
-    used_this_month = supabase.table("streak_freezes").select("id") \
-        .eq("user_id", user_id) \
-        .gte("used_at", str(month_start)) \
-        .execute()
-    
-    if len(used_this_month.data or []) >= 3:
-        raise HTTPException(429, "Max 3 freeze tokens per month")
-    
-    supabase.table("streak_freezes").insert({
-        "user_id": user_id,
-        "used_date": str(today),
-    }).execute()
-    
-    return {"ok": True, "message": "Streak saved!"}
+    """Consume a freeze token to protect streak after missing one day."""
+    return activate_freeze(supabase, user_id)
+
 
 @app.get("/streaks/tokens-remaining")
 def get_freeze_tokens(user_id: str = Depends(get_current_user)):
-    """Get remaining streak freeze tokens for this month."""
-    today = date.today()
-    month_start = today.replace(day=1)
-    
-    used = supabase.table("streak_freezes").select("id") \
-        .eq("user_id", user_id) \
-        .gte("used_at", str(month_start)) \
-        .execute()
-    
-    remaining = max(0, 3 - len(used.data or []))
-    return {"remaining": remaining, "total_per_month": 3}
+    """Token inventory and active freeze status."""
+    return get_token_inventory(supabase, user_id)
 
 # ─── Goal Management Routes ───────────────────────────────────────────
 
@@ -891,6 +896,7 @@ class PreferencesUpdate(BaseModel):
     preferred_platforms: List[str]
     learning_style: str  # visual, auditory, kinesthetic, reading
     pace: str = "moderate"
+    preferred_interaction_mode: str = "collaborative"  # teaching, collaborative, discussion
 
 @app.post("/goals", status_code=201)
 async def create_goal(data: GoalCreate, user_id: str = Depends(get_current_user)):
@@ -907,13 +913,15 @@ async def create_goal(data: GoalCreate, user_id: str = Depends(get_current_user)
     
     goal = result.data[0]
     
-    # Auto-generate learning path using ML
     try:
-        path = await _generate_learning_path(goal, user_id)
-        goal["learning_path"] = path
+        from learning_path_ai import generate_learning_path
+        path = await generate_learning_path(supabase, goal, user_id)
+        goal["milestones"] = path
+        goal["path_source"] = path[0].get("_source") if path else "none"
     except Exception as e:
         print(f"Path generation failed: {e}")
-    
+        goal["milestones"] = []
+
     return goal
 
 @app.get("/goals")
@@ -960,6 +968,7 @@ def update_preferences(data: PreferencesUpdate, user_id: str = Depends(get_curre
         "preferred_platforms": data.preferred_platforms,
         "learning_style": data.learning_style,
         "pace": data.pace,
+        "preferred_interaction_mode": data.preferred_interaction_mode,
     }
     
     if existing.data:
@@ -980,67 +989,10 @@ def get_preferences(user_id: str = Depends(get_current_user)):
         "preferred_platforms": ["YouTube", "Udemy", "Coursera"],
         "learning_style": "visual",
         "pace": "moderate",
+        "preferred_interaction_mode": "collaborative",
     }
 
 # ─── Learning Path Generation (Async) ───────────────────────────────────
-
-async def _generate_learning_path(goal: dict, user_id: str) -> List[dict]:
-    """
-    Generate AI-powered learning path based on goal category and user level.
-    This calls the ML service to suggest milestones and structure.
-    """
-    try:
-        # For MVP: use curated paths by category
-        paths = CURATED_PATHS.get(goal["category"], DEFAULT_PATH)
-        
-        milestones = []
-        for i, milestone in enumerate(paths, 1):
-            result = supabase.table("learning_paths").insert({
-                "goal_id": goal["id"],
-                "sequence": i,
-                "milestone_title": milestone["title"],
-                "description": milestone["description"],
-                "target_duration_hours": milestone["hours"],
-                "status": "not_started",
-            }).execute()
-            milestones.append(result.data[0])
-        
-        return milestones
-    except Exception as e:
-        print(f"Error generating path: {e}")
-        return []
-
-# Curated learning paths by category
-CURATED_PATHS = {
-    "Web Development": [
-        {"title": "HTML & CSS Fundamentals", "description": "Learn semantic HTML and responsive design", "hours": 20},
-        {"title": "JavaScript Core", "description": "Variables, functions, async/await, DOM manipulation", "hours": 30},
-        {"title": "React Basics", "description": "Components, hooks, state management", "hours": 25},
-        {"title": "Backend (Node + Express)", "description": "REST APIs, databases, authentication", "hours": 30},
-        {"title": "Full-Stack Project", "description": "Build and deploy a complete application", "hours": 40},
-    ],
-    "Data Science": [
-        {"title": "Python Fundamentals", "description": "NumPy, Pandas, Matplotlib", "hours": 25},
-        {"title": "Statistics & Probability", "description": "Distributions, hypothesis testing, Bayesian thinking", "hours": 20},
-        {"title": "Machine Learning Basics", "description": "Supervised learning, unsupervised learning, evaluation", "hours": 30},
-        {"title": "Deep Learning", "description": "Neural networks, CNNs, RNNs, transformers", "hours": 35},
-        {"title": "Capstone Project", "description": "End-to-end ML pipeline", "hours": 40},
-    ],
-    "Career Switch": [
-        {"title": "Assess Current Skills", "description": "Identify transferable skills", "hours": 5},
-        {"title": "Domain Basics", "description": "Learn fundamentals of target field", "hours": 30},
-        {"title": "Core Competencies", "description": "Deep dive into key techniques and tools", "hours": 50},
-        {"title": "Build Portfolio", "description": "Create 2-3 portfolio projects", "hours": 60},
-        {"title": "Networking & Applications", "description": "Connect with professionals, apply to roles", "hours": 20},
-    ],
-}
-
-DEFAULT_PATH = [
-    {"title": "Foundation", "description": "Learn core concepts", "hours": 20},
-    {"title": "Intermediate", "description": "Build practical skills", "hours": 30},
-    {"title": "Advanced", "description": "Master the topic", "hours": 40},
-    {"title": "Capstone", "description": "Real-world project", "hours": 50},
-]
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -1053,6 +1005,24 @@ def _static_fallback_recs() -> list:
         {"id": "s5", "platform": "YouTube",      "title": "Statistics for ML — StatQuest",           "tags": ["Stats"],  "match_score": 86, "reason": "Fill the gaps"},
         {"id": "s6", "platform": "Udemy",        "title": "FastAPI — Build Modern APIs",             "tags": ["Python"], "match_score": 83, "reason": "Your next step"},
     ]
+
+
+@app.on_event("startup")
+def startup_reminder_scheduler():
+    try:
+        from reminder_worker import start_reminder_scheduler
+        start_reminder_scheduler(supabase)
+    except Exception as e:
+        print(f"[Reminders] Scheduler not started: {e}")
+
+
+@app.on_event("shutdown")
+def shutdown_reminder_scheduler():
+    try:
+        from reminder_worker import stop_reminder_scheduler
+        stop_reminder_scheduler()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

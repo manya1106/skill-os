@@ -49,6 +49,10 @@ function showMain(status) {
     const ago = formatAgo(d);
     document.getElementById("last-sync-sub").textContent = `Last synced ${ago}`;
     document.getElementById("footer-status").textContent = `Synced ${ago}`;
+  } else {
+    document.getElementById("footer-status").textContent = status.hasEmailHash
+      ? "PII-safe · ready to sync"
+      : "Connected";
   }
 
   renderSiteToggles(status.settings);
@@ -163,6 +167,7 @@ document.getElementById("connect-btn").addEventListener("click", async () => {
     if (!res.ok) throw new Error("Invalid");
 
     await bg("SET_TOKEN", { token });
+    await bg("REFRESH_EMAIL_HASH");
     input.value = "";
     const status = await bg("GET_STATUS");
     renderStatus(status);

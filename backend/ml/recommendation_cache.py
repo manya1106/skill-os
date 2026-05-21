@@ -20,6 +20,9 @@ import logging
 
 logger = logging.getLogger("skill_os.cache")
 
+# Cache up to 100 recommendations per user for fast top-N slicing
+CACHE_TOP_N = int(os.getenv("CACHE_TOP_N", 100))
+
 
 class RecommendationCache:
     """
@@ -92,13 +95,20 @@ class RecommendationCache:
             return None
         
         try:
-            key = self._make_key(user_id, top_n, blend_weights)
+            key = self._make_key(user_id, CACHE_TOP_N, blend_weights)
             cached = self.redis.get(key)
-            
+
             if cached:
                 self.hits += 1
                 logger.debug(f"[Cache] HIT: {key}")
-                return json.loads(cached)
+                data = json.loads(cached)
+                if isinstance(data, dict) and "recommendations" in data:
+                    recs = data["recommendations"]
+                elif isinstance(data, list):
+                    recs = data
+                else:
+                    return None
+                return recs[:top_n]
             
             self.misses += 1
             logger.debug(f"[Cache] MISS: {key}")
@@ -133,21 +143,19 @@ class RecommendationCache:
             return False
         
         try:
-            key = self._make_key(user_id, top_n, blend_weights)
+            # Always store up to CACHE_TOP_N for sub-200ms top-N slicing
+            to_store = recommendations[:CACHE_TOP_N]
+            key = self._make_key(user_id, CACHE_TOP_N, blend_weights)
             ttl = ttl or self.ttl_seconds
-            
-            # Serialize with metadata
+
             cache_data = {
-                "recommendations": recommendations,
+                "recommendations": to_store,
                 "cached_at": datetime.utcnow().isoformat(),
                 "ttl_seconds": ttl,
+                "stored_top_n": len(to_store),
             }
-            
-            self.redis.setex(
-                key,
-                ttl,
-                json.dumps(cache_data),
-            )
+
+            self.redis.setex(key, ttl, json.dumps(cache_data))
             
             logger.debug(f"[Cache] SET: {key} (TTL {ttl}s)")
             return True

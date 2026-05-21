@@ -68,6 +68,11 @@ export const api = {
     req(`/decks/${deckId}/cards`, { method: "POST", body: JSON.stringify(data) }),
   reviewCard: (id, rating) =>
     req(`/cards/${id}/review`, { method: "POST", body: JSON.stringify({ rating }) }),
+  cardIntervalPreview: (id) => req(`/cards/${id}/interval-preview`),
+  remindersDue: () => req("/reminders/due"),
+  reminderSettings: () => req("/reminders/settings"),
+  updateReminderSettings: (data) =>
+    req("/reminders/settings", { method: "PATCH", body: JSON.stringify(data) }),
 
   // ── Activity ──────────────────────────────────────────────────────────────
   heatmap: () => req("/activity/heatmap"),
@@ -94,11 +99,20 @@ export const api = {
   updatePreferences: (data) =>
     req("/preferences", { method: "POST", body: JSON.stringify(data) }),
   getPreferences: () => req("/preferences"),
+  goalPredictions: (goalId) => req(`/analytics/predictions/${goalId}`),
 
   // ── Study buddies ─────────────────────────────────────────────────────────
   buddyMatches:     ()      => req("/buddies/matches"),
   sendBuddyRequest: (toId)  =>
     req("/buddies/request", { method: "POST", body: JSON.stringify({ to_user_id: toId }) }),
+  buddySessions: () => req("/buddies/sessions"),
+  scheduleBuddySession: (buddyId, data) =>
+    req(`/buddies/${buddyId}/schedule`, { method: "POST", body: JSON.stringify(data) }),
+  buddySlots: (buddyId) => req(`/buddies/${buddyId}/slots`),
+
+  // ── Streak freezes ────────────────────────────────────────────────────────
+  freezeTokens: () => req("/streaks/tokens-remaining"),
+  useFreezeToken: () => req("/streaks/freeze", { method: "POST" }),
 
   // ── ML admin ──────────────────────────────────────────────────────────────
   mlHealth:  ()       => req("/ml/health"),

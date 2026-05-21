@@ -7,7 +7,7 @@ export default function GoalProgress({ goalId }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    api.get(`/analytics/predictions/${goalId}`)
+    api.goalPredictions(goalId)
       .then(setPred)
       .catch(console.error)
       .finally(() => setLoading(false));

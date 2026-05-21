@@ -1,12 +1,16 @@
 """
-FIXED: DAE-CF Recommender with Proper User Interaction Loading
-==============================================================
+DAE-CF: Denoising Autoencoder Collaborative Filtering
+------------------------------------------------------
 
-Key fixes:
-1. Load actual user interaction vector instead of zeros
-2. Proper cold-start fallback
-3. Deduplication against user history
-4. Inference caching wrapper
+Architecture:
+  Input  →  [I → 1024 → 512 → 128 (latent)]   Encoder
+  Latent →  [128 → 512 → 1024 → I]             Decoder
+
+Inference uses each user's actual interaction vector (not zeros).
+Hybrid blend: 0.7 × CF + 0.3 × TF-IDF (configurable in app.py).
+
+Run from backend/:
+  python -m ml.train_dae --demo
 """
 
 import os
@@ -14,40 +18,189 @@ import json
 import numpy as np
 import pandas as pd
 from typing import Optional, List, Dict
-from datetime import datetime
+
+DEFAULT_MODEL_DIR = os.path.join(os.path.dirname(__file__), "model")
 
 
-class DAERecommenderFixed:
+# ─── 1. Load interaction data ────────────────────────────────────────────────
+
+def load_interaction_matrix(supabase):
+    """Build user × resource implicit feedback matrix from Supabase."""
+    interactions = supabase.table("interactions").select(
+        "user_id, resource_id, event_type, value"
+    ).execute().data or []
+
+    if not interactions:
+        print("[DAE-CF] No interaction data found. Train after real users sign up.")
+        return None, None, None
+
+    df = pd.DataFrame(interactions)
+    df["implicit"] = df.apply(_weight_event, axis=1)
+    matrix = df.groupby(["user_id", "resource_id"])["implicit"].sum().reset_index()
+    pivot = matrix.pivot(
+        index="user_id", columns="resource_id", values="implicit"
+    ).fillna(0)
+    pivot = pivot.clip(0, 1)
+
+    user_ids = list(pivot.index)
+    resource_ids = list(pivot.columns)
+    X = pivot.values.astype(np.float32)
+
+    print(f"[DAE-CF] Matrix: {X.shape[0]} users × {X.shape[1]} resources")
+    return X, user_ids, resource_ids
+
+
+def _weight_event(row) -> float:
+    evt = row.get("event_type", "")
+    val = float(row.get("value") or 0)
+    weights = {
+        "watch": val / 100.0,
+        "complete": 1.0,
+        "bookmark": 0.5,
+        "progress": val / 100.0 * 0.7,
+        "start": 0.1,
+    }
+    return weights.get(evt, 0.05)
+
+
+# ─── 2. Model architecture ───────────────────────────────────────────────────
+
+def build_dae_model(n_items: int, latent_dim: int = 128, dropout_rate: float = 0.3):
+    """Encoder 1024 → 512 → 128, decoder mirrored."""
+    import tensorflow as tf
+    from tensorflow import keras
+
+    inp = keras.Input(shape=(n_items,), name="user_vector")
+    noisy = keras.layers.GaussianNoise(0.1)(inp)
+
+    x = keras.layers.Dense(
+        1024, activation="relu", kernel_regularizer=keras.regularizers.l2(1e-5)
+    )(noisy)
+    x = keras.layers.Dropout(dropout_rate)(x)
+    x = keras.layers.Dense(
+        512, activation="relu", kernel_regularizer=keras.regularizers.l2(1e-5)
+    )(x)
+    x = keras.layers.Dropout(dropout_rate)(x)
+    latent = keras.layers.Dense(latent_dim, activation="relu", name="latent")(x)
+
+    x = keras.layers.Dense(512, activation="relu")(latent)
+    x = keras.layers.Dense(1024, activation="relu")(x)
+    output = keras.layers.Dense(n_items, activation="sigmoid", name="reconstruction")(x)
+
+    model = keras.Model(inputs=inp, outputs=output, name="DAE-CF")
+
+    def weighted_mse(y_true, y_pred):
+        confidence = 1.0 + 9.0 * y_true
+        return tf.reduce_mean(confidence * tf.square(y_true - y_pred))
+
+    model.compile(
+        optimizer=keras.optimizers.Adam(learning_rate=1e-3),
+        loss=weighted_mse,
+    )
+    model.summary()
+    return model
+
+
+# ─── 3. Training ───────────────────────────────────────────────────────────────
+
+def train(
+    supabase=None,
+    X: np.ndarray = None,
+    epochs: int = 40,
+    batch_size: int = 64,
+    model_dir: str = None,
+):
+    """Train DAE-CF and save to model_dir (default: ml/model/)."""
+    model_dir = model_dir or DEFAULT_MODEL_DIR
+    os.makedirs(model_dir, exist_ok=True)
+
+    if X is None:
+        if supabase is None:
+            raise ValueError("Provide either supabase client or matrix X")
+        X, user_ids, resource_ids = load_interaction_matrix(supabase)
+        if X is None:
+            return None
+    else:
+        user_ids = [str(i) for i in range(X.shape[0])]
+        resource_ids = [str(i) for i in range(X.shape[1])]
+
+    from tensorflow import keras
+
+    n_items = X.shape[1]
+    model = build_dae_model(n_items)
+
+    split = max(1, int(len(X) * 0.9))
+    X_train, X_val = X[:split], X[split:]
+
+    callbacks = [
+        keras.callbacks.EarlyStopping(
+            monitor="val_loss", patience=5, restore_best_weights=True
+        ),
+        keras.callbacks.ReduceLROnPlateau(
+            monitor="val_loss", factor=0.5, patience=3, min_lr=1e-5
+        ),
+    ]
+
+    history = model.fit(
+        X_train,
+        X_train,
+        validation_data=(X_val, X_val) if len(X_val) > 0 else None,
+        epochs=epochs,
+        batch_size=batch_size,
+        callbacks=callbacks,
+        verbose=1,
+    )
+
+    model_path = os.path.join(model_dir, "dae_cf.h5")
+    meta_path = os.path.join(model_dir, "meta.json")
+    model.save(model_path)
+
+    meta = {"user_ids": user_ids, "resource_ids": resource_ids}
+    with open(meta_path, "w") as f:
+        json.dump(meta, f)
+
+    print(f"[DAE-CF] Model saved to {model_path}")
+    val_loss = history.history.get("val_loss", ["n/a"])[-1]
+    print(f"[DAE-CF] Final val_loss: {val_loss:.4f}" if isinstance(val_loss, float) else f"[DAE-CF] Final val_loss: {val_loss}")
+    return model, user_ids, resource_ids
+
+
+# ─── 4. Inference ──────────────────────────────────────────────────────────────
+
+class DAERecommender:
     """
-    Fixed DAE-CF recommender that actually uses user interaction history.
+    DAE-CF inference with real user interaction vectors (not zeros).
+    Supports optional TF-IDF hybrid blending at inference time.
     """
-    def __init__(self, model_dir: str = "model", supabase=None):
+
+    def __init__(self, model_dir: str = None, supabase=None):
         self.model = None
         self.user_ids: list = []
         self.resource_ids: list = []
         self.supabase = supabase
-        self._load(model_dir)
+        self.model_dir = model_dir or DEFAULT_MODEL_DIR
+        self._load(self.model_dir)
 
     def _load(self, model_dir: str):
         model_path = os.path.join(model_dir, "dae_cf.h5")
-        meta_path  = os.path.join(model_dir, "meta.json")
-        
+        meta_path = os.path.join(model_dir, "meta.json")
+
         if not os.path.exists(model_path):
             print("[DAE-CF] No trained model found. Using TF-IDF fallback.")
             return
-        
+
         try:
             import tensorflow as tf
-            self.model = tf.keras.models.load_model(
-                model_path,
-                compile=False,
-            )
+
+            self.model = tf.keras.models.load_model(model_path, compile=False)
             with open(meta_path) as f:
                 meta = json.load(f)
-            self.user_ids    = meta["user_ids"]
+            self.user_ids = meta["user_ids"]
             self.resource_ids = meta["resource_ids"]
-            print(f"[DAE-CF] Model loaded — {len(self.user_ids)} users, "
-                  f"{len(self.resource_ids)} resources")
+            print(
+                f"[DAE-CF] Model loaded — {len(self.user_ids)} users, "
+                f"{len(self.resource_ids)} resources"
+            )
         except Exception as e:
             print(f"[DAE-CF] Could not load model: {e}. Using TF-IDF fallback.")
             self.model = None
@@ -56,56 +209,37 @@ class DAERecommenderFixed:
         return self.model is not None
 
     def _build_user_interaction_vector(self, user_id: str) -> np.ndarray:
-        """
-        BUILD ACTUAL USER INTERACTION VECTOR
-        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-        
-        FIX #1: This was missing entirely — always using zeros!
-        
-        Load user's interaction history and embed it as a sparse vector:
-        - Index = resource_id position in self.resource_ids
-        - Value = interaction strength (0.0 to 1.0)
-        
-        Interaction strength calculation:
-        - watch_percentage: 0-1 normalized
-        - completion bonus: +0.5 if completed
-        - bookmark bonus: +0.3 if manually saved
-        - Total clipped to [0, 1]
-        """
+        """Embed user interaction history as a sparse resource vector."""
         if not self.supabase:
-            # Fallback: return uniform prior for new users
             return np.ones(len(self.resource_ids), dtype=np.float32) * 0.1
-        
+
         try:
-            # Fetch user's actual interactions
-            interactions = self.supabase.table("interactions").select(
-                "resource_id, event_type, value"
-            ).eq("user_id", user_id).execute()
-            
-            # Initialize zero vector
+            interactions = (
+                self.supabase.table("interactions")
+                .select("resource_id, event_type, value")
+                .eq("user_id", user_id)
+                .execute()
+            )
+
             user_vec = np.zeros(len(self.resource_ids), dtype=np.float32)
-            
             if not interactions.data:
-                # Cold-start: use weak prior
                 return user_vec + 0.1
-            
-            # Build resource_id → index mapping
-            resource_id_to_idx = {rid: i for i, rid in enumerate(self.resource_ids)}
-            
-            # Aggregate interaction strength per resource
+
+            resource_id_to_idx = {
+                rid: i for i, rid in enumerate(self.resource_ids)
+            }
             resource_scores: Dict[str, float] = {}
+
             for evt in interactions.data:
                 rid = evt["resource_id"]
                 if rid not in resource_id_to_idx:
-                    continue  # Unknown resource
-                
+                    continue
+
                 evt_type = evt.get("event_type", "")
                 value = float(evt.get("value") or 0)
-                
-                # Calculate interaction strength
-                strength = 0.0
+
                 if evt_type == "watch":
-                    strength = value / 100.0  # 0-1
+                    strength = value / 100.0
                 elif evt_type == "complete":
                     strength = 1.0
                 elif evt_type == "bookmark":
@@ -116,23 +250,32 @@ class DAERecommenderFixed:
                     strength = 0.1
                 else:
                     strength = 0.05
-                
-                # Accumulate (can be called multiple times per resource)
+
                 current = resource_scores.get(rid, 0)
-                resource_scores[rid] = min(1.0, current + strength)  # Clip to [0,1]
-            
-            # Map to vector
+                resource_scores[rid] = min(1.0, current + strength)
+
             for rid, score in resource_scores.items():
-                idx = resource_id_to_idx[rid]
-                user_vec[idx] = score
-            
-            print(f"[DAE-CF] User {user_id}: {len(resource_scores)} resources interacted, "
-                  f"avg strength {np.mean(user_vec):.3f}")
+                user_vec[resource_id_to_idx[rid]] = score
+
             return user_vec
-            
+
         except Exception as e:
             print(f"[DAE-CF] Failed to build interaction vector for {user_id}: {e}")
             return np.ones(len(self.resource_ids), dtype=np.float32) * 0.1
+
+    def _seen_resources(self, user_id: str) -> set:
+        if not self.supabase:
+            return set()
+        try:
+            resp = (
+                self.supabase.table("interactions")
+                .select("resource_id")
+                .eq("user_id", user_id)
+                .execute()
+            )
+            return {i["resource_id"] for i in (resp.data or [])}
+        except Exception:
+            return set()
 
     def recommend(
         self,
@@ -142,120 +285,69 @@ class DAERecommenderFixed:
         tfidf_scores: Optional[Dict[str, float]] = None,
     ) -> Optional[List[dict]]:
         """
-        Personalized recommendations via hybrid DAE-CF + TF-IDF.
-        
-        FIX #2: Proper inference with actual user history
-        FIX #3: Hybrid blending support (see implementation below)
-        
-        Args:
-            user_id: User to recommend for
-            top_n: Number of recommendations to return
-            tfidf_weight: Weight of TF-IDF in ensemble (0.0-1.0)
-            tfidf_scores: Pre-computed TF-IDF scores {resource_id: score}
-        
-        Returns:
-            List of {resource_id, cf_score, tfidf_score, final_score}
-            OR None if model not ready
+        Personalized recommendations using actual user history at inference.
+
+        Returns list of {resource_id, cf_score, tfidf_score, final_score} or None.
         """
         if not self.is_ready():
             return None
-        
+
         if user_id not in self.user_ids:
-            print(f"[DAE-CF] User {user_id} not in training set (cold-start)")
-            return None  # Trigger TF-IDF fallback in Flask layer
-        
+            seen = self._seen_resources(user_id)
+            known = [r for r in seen if r in self.resource_ids]
+            if not known:
+                return None
+
         try:
-            # FIX #1: BUILD ACTUAL USER VECTOR (not zeros!)
             user_vec = self._build_user_interaction_vector(user_id)
             user_vec = np.expand_dims(user_vec, axis=0).astype(np.float32)
-            
-            # Inference: pass through model
-            cf_scores = self.model.predict(user_vec, verbose=0)[0]  # Shape: (n_resources,)
-            
-            # Get user's already-interacted resources (don't re-recommend)
-            user_interactions = self.supabase.table("interactions").select(
-                "resource_id"
-            ).eq("user_id", user_id).execute() if self.supabase else []
-            
-            seen_resources = {i["resource_id"] for i in (user_interactions.data or [])}
-            
-            # Build result with optional TF-IDF blending
+
+            cf_scores = self.model.predict(user_vec, verbose=0)[0]
+            seen_resources = self._seen_resources(user_id)
+
             results = []
             for i, rid in enumerate(self.resource_ids):
-                # Skip already-seen resources
                 if rid in seen_resources:
                     continue
-                
+
                 cf_score = float(cf_scores[i])
-                
-                # Hybrid blending
+
                 if tfidf_scores and tfidf_weight > 0:
-                    tfidf_score = tfidf_scores.get(rid, 0.5)
-                    # Weighted combination: (1-w)*CF + w*TFIDF
-                    final_score = ((1 - tfidf_weight) * cf_score + 
-                                   tfidf_weight * tfidf_score)
+                    tfidf_score = float(tfidf_scores.get(rid, 0.0))
+                    final_score = (1 - tfidf_weight) * cf_score + tfidf_weight * tfidf_score
                 else:
                     tfidf_score = None
                     final_score = cf_score
-                
+
                 results.append({
                     "resource_id": rid,
                     "cf_score": cf_score,
                     "tfidf_score": tfidf_score,
                     "final_score": final_score,
                 })
-            
-            # Sort by final score (descending)
+
             results.sort(key=lambda x: x["final_score"], reverse=True)
-            
-            print(f"[DAE-CF] Recommended {len(results[:top_n])} of {len(results)} "
-                  f"candidates for user {user_id}")
             return results[:top_n]
-            
+
         except Exception as e:
             print(f"[DAE-CF] Inference failed for {user_id}: {e}")
             return None
 
 
-# ── Test harness ───────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
-    """
-    Test the fixed recommender without Supabase (synthetic data mode)
-    """
-    print("[DAE-CF] Testing fixed recommender with synthetic data...")
-    
-    # Synthetic setup: 10 users, 50 resources
-    user_ids = [f"user_{i}" for i in range(10)]
-    resource_ids = [f"res_{i}" for i in range(50)]
-    
-    # Mock Supabase interactions
-    interactions = [
-        {"resource_id": "res_0", "event_type": "watch", "value": 100},
-        {"resource_id": "res_1", "event_type": "bookmark", "value": 1},
-        {"resource_id": "res_2", "event_type": "complete", "value": 1},
-    ]
-    
-    class MockSupabase:
-        def table(self, name):
-            return self
-        
-        def select(self, cols):
-            return self
-        
-        def eq(self, col, val):
-            return self
-        
-        def execute(self):
-            class Result:
-                data = interactions
-            return Result()
-    
-    # Test without model (graceful fallback)
-    rec = DAERecommenderFixed(model_dir="/nonexistent", supabase=MockSupabase())
-    print(f"✓ Model ready: {rec.is_ready()}")
-    print(f"✓ Interaction vector building works")
-    print("\nTo test with actual model:")
-    print("1. Train DAE-CF with real data: python -m ml.train_dae")
-    print("2. Call: rec.recommend('user_0', top_n=6)")
-    print("3. Verify: output differs per user, no duplicates")
+    import sys
+
+    if "--demo" in sys.argv:
+        print("[DAE-CF] Demo training with synthetic data...")
+        X_demo = np.random.binomial(1, 0.1, size=(100, 50)).astype(np.float32)
+        train(X=X_demo, epochs=5, batch_size=16)
+    else:
+        from dotenv import load_dotenv
+        from supabase import create_client
+
+        load_dotenv()
+        sb = create_client(
+            os.getenv("SUPABASE_URL", ""),
+            os.getenv("SUPABASE_KEY", ""),
+        )
+        train(supabase=sb)

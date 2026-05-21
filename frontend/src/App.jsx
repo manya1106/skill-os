@@ -8,7 +8,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import {
   Mail, Lock, Eye, EyeOff, ArrowRight, Zap,
   Bell, LayoutDashboard, BookOpen, Trophy, LogOut,
-  Star, Flame, Sparkles, Layers, Users, User, BarChart2,
+  Star, Flame, Sparkles, Layers, Users, User, BarChart2, Target,
 } from "lucide-react";
 
 import { api } from "./api";
@@ -16,6 +16,7 @@ import MyLearning      from "./components/MyLearning";
 import Recommendations from "./components/Recommendations";
 import Flashcards      from "./components/Flashcards";
 import StudyBuddies    from "./components/StudyBuddies";
+import Goals           from "./components/Goals";
 import Analytics       from "./components/Analytics";
 import Rewards         from "./components/Rewards";
 
@@ -25,6 +26,7 @@ const NAV = [
   { id: "recommendations", label: "Recommended",   Icon: Sparkles        },
   { id: "flashcards",      label: "Flashcards",    Icon: Layers          },
   { id: "buddies",         label: "Study buddies", Icon: Users           },
+  { id: "goals",           label: "Goals",         Icon: Target          },
   { id: "analytics",       label: "Analytics",     Icon: BarChart2       },
   { id: "rewards",         label: "Rewards",       Icon: Trophy          },
 ];
@@ -52,7 +54,36 @@ function XPToast({ xp, onDone }) {
 }
 
 // ── Shell ──────────────────────────────────────────────────────────────────────
-function Shell({ page, setPage, onLogout, user, toast, children }) {
+function ReviewReminderPoller({ onDue }) {
+  useEffect(() => {
+    const poll = () =>
+      api.remindersDue()
+        .then((d) => {
+          onDue(d.total_due || 0);
+          if (
+            d.total_due > 0 &&
+            typeof Notification !== "undefined" &&
+            Notification.permission === "granted"
+          ) {
+            new Notification(`SkillOS: ${d.total_due} card${d.total_due !== 1 ? "s" : ""} due`, {
+              body: "Spaced repetition review — keep your retention high.",
+              tag: "fsrs-due",
+            });
+          }
+        })
+        .catch(() => {});
+
+    poll();
+    const id = setInterval(poll, 60 * 60 * 1000);
+    if (typeof Notification !== "undefined" && Notification.permission === "default") {
+      Notification.requestPermission();
+    }
+    return () => clearInterval(id);
+  }, [onDue]);
+  return null;
+}
+
+function Shell({ page, setPage, onLogout, user, toast, dueCount, children }) {
   const initials = user?.name
     ? user.name.split(" ").map(w => w[0]).join("").slice(0, 2).toUpperCase()
     : "??";
@@ -104,7 +135,15 @@ function Shell({ page, setPage, onLogout, user, toast, children }) {
                 textAlign: "left",
               }}>
                 <Icon style={{ width: 15, height: 15, flexShrink: 0 }} />
-                {label}
+                <span style={{ flex: 1 }}>{label}</span>
+                {id === "flashcards" && dueCount > 0 && (
+                  <span style={{
+                    fontSize: 10, fontWeight: 700, background: "#E24B4A", color: "white",
+                    borderRadius: 999, padding: "1px 6px", minWidth: 18, textAlign: "center",
+                  }}>
+                    {dueCount}
+                  </span>
+                )}
               </button>
             ))}
           </nav>
@@ -557,6 +596,7 @@ export default function App() {
   const [user, setUser]         = useState(null);
   const [page, setPage]         = useState("dashboard");
   const [toast, setToast]       = useState(null);
+  const [dueCount, setDueCount] = useState(0);
 
   const refreshUser = useCallback(() => {
     api.me().then(setUser).catch(() => {
@@ -587,13 +627,17 @@ export default function App() {
     "recommendations": <Recommendations />,
     "flashcards":      <Flashcards onXP={() => refreshUser()} />,
     "buddies":         <StudyBuddies />,
+    "goals":           <Goals />,
     "analytics":       <Analytics />,
     "rewards":         <Rewards user={user} />,
   }[page] ?? <Dashboard setPage={setPage} user={user} />;
 
   return (
-    <Shell page={page} setPage={setPage} onLogout={handleLogout} user={user} toast={toast}>
-      {pageEl}
-    </Shell>
+    <>
+      <ReviewReminderPoller onDue={setDueCount} />
+      <Shell page={page} setPage={setPage} onLogout={handleLogout} user={user} toast={toast} dueCount={dueCount}>
+        {pageEl}
+      </Shell>
+    </>
   );
 }
